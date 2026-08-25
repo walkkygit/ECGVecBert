@@ -817,9 +817,13 @@ def get_or_build_finetuning_sentences(
             f"s3://{bucket_out}/{_sentences_s3_key(dataset_name, split, use_frac, si, num_shards)}"
         )
     ]
-    if not missing:
+    if not missing and dataset_name != "dandelion":
         log.info("All fine-tuning sentence shards already exist — skipping generation.")
         return
+
+    if dataset_name == "dandelion":
+        log.info("Dandelion dataset — forcing regeneration of sentence shards.")
+        missing = [(split, si) for split in split_names for si in range(num_shards)]
     splits_needed = sorted({split for split, _ in missing})
     log.info(f"Generating sentence shards for splits: {splits_needed}")
 
