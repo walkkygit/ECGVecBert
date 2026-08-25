@@ -205,17 +205,21 @@ def read_ecg_data(dataset_name, use_frac, train_frac=0.7, val_frac=0.1, test_fra
         all_idx = np.arange(N)
 
         train_idx = all_idx[strat_fold == 0]
-        test_idx = all_idx[strat_fold == 1]
-        val_idx = np.array([], dtype=int)
+        val_idx = all_idx[strat_fold == 1]
+        test_idx = all_idx[strat_fold == 2]
 
         log.info(f"[dandelion] using pre-defined splits:")
         log.info(f"  train: {len(train_idx):,} records")
-        log.info(f"  val:   {len(val_idx):,} records (not used)")
+        log.info(f"  val:   {len(val_idx):,} records")
         log.info(f"  test:  {len(test_idx):,} records")
 
         train_signals = [signals[i] for i in train_idx]
         train_labels = [labels[i] for i in train_idx]
         train_ids = ids[train_idx]
+
+        val_signals = [signals[i] for i in val_idx]
+        val_labels = [labels[i] for i in val_idx]
+        val_ids = ids[val_idx]
 
         test_signals = [signals[i] for i in test_idx]
         test_labels = [labels[i] for i in test_idx]
@@ -223,7 +227,7 @@ def read_ecg_data(dataset_name, use_frac, train_frac=0.7, val_frac=0.1, test_fra
 
         return {
             "train": (train_ids, train_signals, train_labels),
-            "val": ([], [], []),
+            "val": (val_ids, val_signals, val_labels),
             "test": (test_ids, test_signals, test_labels),
         }
 
