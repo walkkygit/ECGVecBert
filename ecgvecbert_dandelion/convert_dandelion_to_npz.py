@@ -65,12 +65,16 @@ df_val = df_merged_10p[n_train:]
 print(f"  Train (80%): {len(df_train):,} records")
 print(f"  Val (20%): {len(df_val):,} records")
 
-# Test data (official, full)
+# Test data (10% for this run)
 test_path = os.path.join(data_path, "df_fullz_testing.feather")
 print(f"  Loading {test_path}")
 with s3_fs.open(test_path, "rb") as f:
-    df_test = pd.read_feather(f)
-print(f"  Test (official): {len(df_test):,} records")
+    df_test_full = pd.read_feather(f)
+print(f"  Test (full): {len(df_test_full):,} records")
+
+# Subsample to 10% for this run
+df_test = df_test_full.sample(frac=DANDELION_USE_FRAC, random_state=42).reset_index(drop=True)
+print(f"  Test (10%): {len(df_test):,} records")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Convert to NPZ format
@@ -173,9 +177,9 @@ val_signals, val_lengths, val_labels, val_ids, val_strat_fold = dandelion_to_npz
     df_val, "val (20% of 10%)", strat_fold_value=1
 )
 
-# Convert test (official 7K, never touched)
+# Convert test (10% for this run)
 test_signals, test_lengths, test_labels, test_ids, test_strat_fold = dandelion_to_npz(
-    df_test, "test (official)", strat_fold_value=2
+    df_test, "test (10%)", strat_fold_value=2
 )
 
 # ────────────────────────────────────────────────────────────────────────────
