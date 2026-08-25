@@ -109,15 +109,22 @@ def read_ecg_signals_from_s3(dataset_name: str) -> dict:
 
 def read_dandelion_npz(use_frac=1.0, data_path=None):
     """
-    Read Dandelion ECG + LVEF labels from NPZ files (pre-converted from feathers).
+    Read Dandelion ECG + LVEF labels from combined NPZ file (pre-converted format).
+
+    NPZ structure (train/val/test in one file):
+        ecg_signals: (N, 5000, 12) float32 — padded signals
+        lengths: (N,) int32 — actual signal length
+        labels: (N, 2) int32 — one-hot encoded binary labels
+        ids: (N,) str — ECG IDs
+        strat_fold: (N,) int32 — 0=train, 1=val, 2=test
 
     Returns
     -------
     dict with:
         signals    : list[np.ndarray]  — one (length_i, 12) array per record (padding trimmed)
-        labels     : list[np.ndarray] — binary LVSD labels (0/1)
+        labels     : list[np.ndarray] — one-hot encoded labels (2,) per record
         ids        : (N,) array — record identifiers
-        strat_fold : (N,) int array — split indicators (0=train, 1=test)
+        strat_fold : (N,) int array — split indicators (0=train, 1=val, 2=test)
     """
     if data_path is None:
         is_sagemaker = os.path.exists("/opt/ml/")
@@ -129,62 +136,51 @@ def read_dandelion_npz(use_frac=1.0, data_path=None):
     signals = []
     labels = []
     ids = []
-    strat_fold = []
+    strat_fold_list = []
 
     try:
-        # Load train (10%)
-        train_path = os.path.join(data_path, "dandelion_train_10p_signals.npz")
-        log.info(f"Loading training NPZ from {train_path}")
-        if train_path.startswith("s3://"):
-            with s3_fs.open(train_path, "rb") as f:
-                train_data = np.load(io.BytesIO(f.read()), allow_pickle=True)
+        # Determine which combined NPZ file to load based on use_frac
+        if use_frac <= 0.1:
+            npz_filename = "dandelion_10p_combined_signals.npz"
         else:
-            train_data = np.load(train_path, allow_pickle=True)
+            npz_filename = "dandelion_100p_combined_signals.npz"
 
-        # Load test
-        test_path = os.path.join(data_path, "dandelion_test_signals.npz")
-        log.info(f"Loading test NPZ from {test_path}")
-        if test_path.startswith("s3://"):
-            with s3_fs.open(test_path, "rb") as f:
-                test_data = np.load(io.BytesIO(f.read()), allow_pickle=True)
+        npz_path = os.path.join(data_path, npz_filename)
+        log.info(f"Loading combined NPZ from {npz_path}")
+
+        if npz_path.startswith("s3://"):
+            with s3_fs.open(npz_path, "rb") as f:
+                data = np.load(io.BytesIO(f.read()), allow_pickle=True)
         else:
-            test_data = np.load(test_path, allow_pickle=True)
+            data = np.load(npz_path, allow_pickle=True)
 
-        # Process train (10%)
-        train_signals_padded = train_data["ecg_signals"]  # (N, 5000, 12)
-        train_lengths = train_data["lengths"]              # (N,)
-        train_labels = train_data["labels"]                # (N, 1)
-        train_ids = train_data["ids"].astype(str)          # (N,)
+        # Extract arrays from combined NPZ
+        signals_padded = data["ecg_signals"]  # (N, 5000, 12)
+        lengths = data["lengths"]             # (N,)
+        labels_onehot = data["labels"]        # (N, 2) — one-hot encoded
+        ids_arr = data["ids"].astype(str)     # (N,)
+        strat_fold = data["strat_fold"]       # (N,) — 0=train, 1=val, 2=test
 
-        for i in range(len(train_signals_padded)):
-            signal = train_signals_padded[i, :train_lengths[i], :]
-            label = int(train_labels[i, 0])
+        # Trim padding and build lists
+        for i in range(len(signals_padded)):
+            signal = signals_padded[i, :lengths[i], :]  # (length_i, 12)
+            label = labels_onehot[i].astype(np.float32)  # (2,) one-hot
+
             signals.append(signal)
-            labels.append(np.array([label], dtype=np.float32))
-            ids.append(train_ids[i])
-            strat_fold.append(0)
+            labels.append(label)
+            ids.append(ids_arr[i])
+            strat_fold_list.append(int(strat_fold[i]))
 
-        # Process test
-        test_signals_padded = test_data["ecg_signals"]    # (N, 5000, 12)
-        test_lengths = test_data["lengths"]                # (N,)
-        test_labels = test_data["labels"]                  # (N, 1)
-        test_ids = test_data["ids"].astype(str)            # (N,)
-
-        for i in range(len(test_signals_padded)):
-            signal = test_signals_padded[i, :test_lengths[i], :]
-            label = int(test_labels[i, 0])
-            signals.append(signal)
-            labels.append(np.array([label], dtype=np.float32))
-            ids.append(test_ids[i])
-            strat_fold.append(1)
-
-        log.info(f"[dandelion] loaded {len(signals):,} signals from NPZ")
+        log.info(f"[dandelion] loaded {len(signals):,} signals from {npz_filename}")
+        log.info(f"  Train (strat_fold=0): {sum(1 for x in strat_fold_list if x == 0):,}")
+        log.info(f"  Val (strat_fold=1): {sum(1 for x in strat_fold_list if x == 1):,}")
+        log.info(f"  Test (strat_fold=2): {sum(1 for x in strat_fold_list if x == 2):,}")
 
         return {
             "signals": signals,
             "labels": labels,
             "ids": np.array(ids, dtype=str),
-            "strat_fold": np.array(strat_fold, dtype=int),
+            "strat_fold": np.array(strat_fold_list, dtype=int),
         }
 
     except Exception as e:
