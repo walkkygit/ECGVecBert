@@ -572,7 +572,9 @@ def train_loop_per_worker(loop_config: dict) -> None:
 
     epochs_no_improve = 0
     best_val_auroc = -float("inf")
+    best_val_acc = -float("inf")
     val_auroc_history: list[float] = []
+    val_acc_history: list[float] = []
     SMOOTH_WINDOW = 5
     _s3 = s3fs.S3FileSystem()
 
@@ -662,22 +664,35 @@ def train_loop_per_worker(loop_config: dict) -> None:
         # Early stopping + best-checkpoint saving, decided on rank 0 and broadcast.
 
         val_auroc_history.append(val_metrics["auroc"])
+        val_acc_history.append(val_metrics["acc"])
         smoothed_val_auroc = float(np.mean(val_auroc_history[-SMOOTH_WINDOW:]))
+        smoothed_val_acc = float(np.mean(val_acc_history[-SMOOTH_WINDOW:]))
         
         stop_flag = torch.zeros(1, dtype=torch.int32, device=device)
         if is_main_process():
             # Wait until at least SMOOTH_WINDOW runs
             window_full = len(val_auroc_history) >= SMOOTH_WINDOW
-            improved = window_full and (smoothed_val_auroc - best_val_auroc) > min_delta
+
+            # If AUROC is NaN (due to class imbalance), use accuracy; otherwise use AUROC
+            if np.isnan(smoothed_val_auroc):
+                improved = window_full and (smoothed_val_acc - best_val_acc) > min_delta
+                metric_name = "accuracy"
+            else:
+                improved = window_full and (smoothed_val_auroc - best_val_auroc) > min_delta
+                metric_name = "AUROC"
+
             if improved:
-                best_val_auroc = smoothed_val_auroc
+                if not np.isnan(smoothed_val_auroc):
+                    best_val_auroc = smoothed_val_auroc
+                else:
+                    best_val_acc = smoothed_val_acc
                 epochs_no_improve = 0
                 save_lora_checkpoint(model, _s3, use_frac, dataset_name, loop_config["seed"])
             else:
                 epochs_no_improve += 1
                 if epochs_no_improve >= patience:
                     log.info(f"Early stopping after {epoch + 1} epochs. "
-                             f"No improvement in val auroc for {patience} consecutive epochs.")
+                             f"No improvement in val {metric_name} for {patience} consecutive epochs.")
                     stop_flag[0] = 1
 
         if ddp_is_initialized():
