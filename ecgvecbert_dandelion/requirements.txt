@@ -1,0 +1,18 @@
+# libraries
+neurokit2==0.2.12
+wfdb==4.1.2
+hdf5plugin==4.4.0
+boto3==1.35.16
+botocore==1.35.16
+s3fs==2024.9.0
+fsspec==2024.9.0
+aiobotocore==2.15.0
+h5py==3.11.0
+numpy==1.26.4
+tqdm==4.66.2
+# Ray Train (TorchTrainer, ScalingConfig, RunConfig)
+ray[train]==2.37.0
+# PEFT / LoRA (LoraConfig, get_peft_model, get_peft_model_state_dict, LoraLayer)
+peft==0.13.0
+# sklearn metrics (roc_auc_score, accuracy_score, f1_score, label_binarize)
+scikit-learn==1.5.2
