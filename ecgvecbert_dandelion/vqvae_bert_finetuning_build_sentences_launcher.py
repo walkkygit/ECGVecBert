@@ -74,12 +74,6 @@ def make_estimator(sm_session, ROLE_ARN, in_channels: int, use_frac: float, hp) 
         sagemaker_session=sm_session,
         base_job_name=job_name,
         output_path=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/",
-        # torchrun handles DDP process launch across GPUs on each node
-        distribution={
-            "torch_distributed": {
-                "enabled": True,
-            }
-        },
         hyperparameters=hp,
         # Install extra dependencies not in the base container
         # If using a requirements.txt in SOURCE_DIR, SageMaker installs it automatically

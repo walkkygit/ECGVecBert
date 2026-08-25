@@ -1005,13 +1005,15 @@ def _make_split_dataloader(
 
 
 def _init_distributed() -> tuple[int, int, int]:
-    """Initialize the default process group started by torchrun and return
-    (global_rank, local_rank, world_size)."""
-    if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
+    """Initialize DDP if running under torchrun. Otherwise run as single-process."""
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
-    return dist.get_rank(), local_rank, dist.get_world_size()
+
+    if "RANK" in os.environ and not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+        return dist.get_rank(), local_rank, dist.get_world_size()
+    else:
+        return 0, local_rank, 1
 
 
 def main(in_channels: int, use_frac: float, batch_size: int, cnn_embed_type: str, cnn_embed_scale: float) -> None:
