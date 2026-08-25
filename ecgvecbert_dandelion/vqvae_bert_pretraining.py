@@ -52,7 +52,7 @@ CONFIG = {
     'seed': 42,
     'warmup_epochs': 10,
     'min_lr_factor': 0.1,
-    'use_cnn_features': False,
+    'use_cnn_features': True,
     'bert_dropout': 0.1,
     'cnn_scale_init': 1.0,
 }
