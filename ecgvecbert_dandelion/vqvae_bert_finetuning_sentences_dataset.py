@@ -107,14 +107,14 @@ def read_ecg_signals_from_s3(dataset_name: str) -> dict:
     return result
 
 
-def read_dandelion_data(use_frac=1.0, data_path=None):
+def read_dandelion_npz(use_frac=1.0, data_path=None):
     """
-    Read Dandelion ECG + LVEF labels from feather files.
+    Read Dandelion ECG + LVEF labels from NPZ files (pre-converted from feathers).
 
     Returns
     -------
     dict with:
-        signals    : list[np.ndarray]  — one (length_i, 12) array per record
+        signals    : list[np.ndarray]  — one (length_i, 12) array per record (padding trimmed)
         labels     : list[np.ndarray] — binary LVSD labels (0/1)
         ids        : (N,) array — record identifiers
         strat_fold : (N,) int array — split indicators (0=train, 1=test)
@@ -126,72 +126,59 @@ def read_dandelion_data(use_frac=1.0, data_path=None):
         else:
             data_path = "/Users/burcuozek/Desktop/dandelion data"
 
-    LEAD_COLS = ['lead_I', 'lead_II', 'lead_III',
-                 'lead_aVR', 'lead_aVL', 'lead_aVF',
-                 'lead_V1', 'lead_V2', 'lead_V3', 'lead_V4', 'lead_V5', 'lead_V6']
-
     signals = []
     labels = []
     ids = []
     strat_fold = []
 
     try:
-        train_path = os.path.join(data_path, "df_fullz_merged_dandelion.feather")
-        log.info(f"Loading training feathers from {train_path}")
+        # Load train (10%)
+        train_path = os.path.join(data_path, "dandelion_train_10p_signals.npz")
+        log.info(f"Loading training NPZ from {train_path}")
         if train_path.startswith("s3://"):
             with s3_fs.open(train_path, "rb") as f:
-                df_train = pd.read_feather(f)
+                train_data = np.load(io.BytesIO(f.read()), allow_pickle=True)
         else:
-            df_train = pd.read_feather(train_path)
+            train_data = np.load(train_path, allow_pickle=True)
 
-        test_path = os.path.join(data_path, "df_fullz_testing.feather")
-        log.info(f"Loading test feathers from {test_path}")
+        # Load test
+        test_path = os.path.join(data_path, "dandelion_test_signals.npz")
+        log.info(f"Loading test NPZ from {test_path}")
         if test_path.startswith("s3://"):
             with s3_fs.open(test_path, "rb") as f:
-                df_test = pd.read_feather(f)
+                test_data = np.load(io.BytesIO(f.read()), allow_pickle=True)
         else:
-            df_test = pd.read_feather(test_path)
+            test_data = np.load(test_path, allow_pickle=True)
 
-        df_train['__split__'] = 0
-        df_test['__split__'] = 1
-        df_all = pd.concat([df_train, df_test], ignore_index=False).reset_index(drop=True)
+        # Process train (10%)
+        train_signals_padded = train_data["ecg_signals"]  # (N, 5000, 12)
+        train_lengths = train_data["lengths"]              # (N,)
+        train_labels = train_data["labels"]                # (N, 1)
+        train_ids = train_data["ids"].astype(str)          # (N,)
 
-        for idx, row in df_all.iterrows():
-            try:
-                ecg_leads = []
-                for lead_col in LEAD_COLS:
-                    if lead_col in row.index:
-                        lead_data = row[lead_col]
-                        if isinstance(lead_data, list):
-                            ecg_leads.append(np.array(lead_data, dtype=np.float32))
-                        elif isinstance(lead_data, np.ndarray):
-                            ecg_leads.append(lead_data.astype(np.float32))
-                        else:
-                            ecg_leads.append(np.array([lead_data], dtype=np.float32))
-                    else:
-                        raise ValueError(f"Missing lead column: {lead_col}")
+        for i in range(len(train_signals_padded)):
+            signal = train_signals_padded[i, :train_lengths[i], :]
+            label = int(train_labels[i, 0])
+            signals.append(signal)
+            labels.append(np.array([label], dtype=np.float32))
+            ids.append(train_ids[i])
+            strat_fold.append(0)
 
-                ecg_array = np.array(ecg_leads, dtype=np.float32)
-                signal = ecg_array.T
+        # Process test
+        test_signals_padded = test_data["ecg_signals"]    # (N, 5000, 12)
+        test_lengths = test_data["lengths"]                # (N,)
+        test_labels = test_data["labels"]                  # (N, 1)
+        test_ids = test_data["ids"].astype(str)            # (N,)
 
-                # Verify shape before appending
-                assert signal.ndim == 2, f"ERROR: signal is {signal.ndim}D, should be 2D (L, 12)"
-                assert signal.shape[1] == 12, f"ERROR: {signal.shape[1]} leads, should be 12"
+        for i in range(len(test_signals_padded)):
+            signal = test_signals_padded[i, :test_lengths[i], :]
+            label = int(test_labels[i, 0])
+            signals.append(signal)
+            labels.append(np.array([label], dtype=np.float32))
+            ids.append(test_ids[i])
+            strat_fold.append(1)
 
-                label = int(row["label"]) if "label" in row.index else 0
-                ecg_id = str(row["ecg_filename"]) if "ecg_filename" in row.index else f"dandelion_{idx}"
-                split = int(row["__split__"])
-
-                signals.append(signal)
-                labels.append(np.array([label], dtype=np.float32))
-                ids.append(ecg_id)
-                strat_fold.append(split)
-
-            except Exception as e:
-                log.warning(f"Failed to process Dandelion record {idx}: {e}")
-                continue
-
-        log.info(f"[dandelion] loaded {len(signals):,} signals from {data_path}")
+        log.info(f"[dandelion] loaded {len(signals):,} signals from NPZ")
 
         return {
             "signals": signals,
@@ -201,7 +188,7 @@ def read_dandelion_data(use_frac=1.0, data_path=None):
         }
 
     except Exception as e:
-        log.error(f"Error reading Dandelion data from {data_path}: {e}")
+        log.error(f"Error reading Dandelion NPZ from {data_path}: {e}")
         raise
 
 
@@ -212,7 +199,7 @@ def read_ecg_data(dataset_name, use_frac, train_frac=0.7, val_frac=0.1, test_fra
         raise ValueError("Fractions must sum to 1")
 
     if dataset_name == "dandelion":
-        store = read_dandelion_data(use_frac=use_frac)
+        store = read_dandelion_npz(use_frac=use_frac)
         signals = store["signals"]
         labels = store["labels"]
         ids = np.asarray(store["ids"])
