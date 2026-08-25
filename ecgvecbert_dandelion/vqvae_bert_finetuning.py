@@ -70,7 +70,7 @@ CONFIG = {
 
 prefix_root = "aruna-files/vqvae"
 prefix_finetuning = "ecgvectbert/vqvae/bert_finetuning"
-prefix_root_bert_model = "aruna-files/vqvae/bert_pretraining"
+prefix_root_bert_model = "aruna-files/vqvae_final_12lead_vqenc/vqvae/bert_pretraining"
 prefix_sentences = f"{prefix_finetuning}/sentences"
 
 NUM_CLASSES = {"ptbxl_superclasses": 5,
