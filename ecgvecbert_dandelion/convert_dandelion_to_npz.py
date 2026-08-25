@@ -47,23 +47,30 @@ else:
 
 print("\n[1] Loading Dandelion feathers from S3...")
 
-# Training data (10%)
-train_path = os.path.join(data_path, "df_fullz_merged_dandelion.feather")
-print(f"  Loading {train_path}")
-with s3_fs.open(train_path, "rb") as f:
-    df_train_full = pd.read_feather(f)
-print(f"  Full training: {len(df_train_full):,} records")
+# Merged data (ALL, no subsampling yet)
+merged_path = os.path.join(data_path, "df_fullz_merged_dandelion.feather")
+print(f"  Loading {merged_path}")
+with s3_fs.open(merged_path, "rb") as f:
+    df_merged = pd.read_feather(f)
+print(f"  Merged: {len(df_merged):,} records")
 
-# Subsample to 10%
-df_train = df_train_full.sample(frac=DANDELION_USE_FRAC, random_state=42).reset_index(drop=True)
-print(f"  Subsampled to 10%: {len(df_train):,} records")
+# Subsample to 10% for this run (but will split into train/val)
+df_merged_10p = df_merged.sample(frac=DANDELION_USE_FRAC, random_state=42).reset_index(drop=True)
+print(f"  Subsampled to 10%: {len(df_merged_10p):,} records")
 
-# Test data (full)
+# Split 10% merged into 80% train / 20% val
+n_train = int(len(df_merged_10p) * 0.8)
+df_train = df_merged_10p[:n_train]
+df_val = df_merged_10p[n_train:]
+print(f"  Train (80%): {len(df_train):,} records")
+print(f"  Val (20%): {len(df_val):,} records")
+
+# Test data (official, full)
 test_path = os.path.join(data_path, "df_fullz_testing.feather")
 print(f"  Loading {test_path}")
 with s3_fs.open(test_path, "rb") as f:
     df_test = pd.read_feather(f)
-print(f"  Test: {len(df_test):,} records")
+print(f"  Test (official): {len(df_test):,} records")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Convert to NPZ format
@@ -156,14 +163,19 @@ def dandelion_to_npz(df, split_name="train", strat_fold_value=0):
 
     return ecg_signals, lengths, labels, ids, strat_fold
 
-# Convert train
+# Convert train (80% of 10%)
 train_signals, train_lengths, train_labels, train_ids, train_strat_fold = dandelion_to_npz(
-    df_train, "train (10%)", strat_fold_value=0
+    df_train, "train (80% of 10%)", strat_fold_value=0
 )
 
-# Convert test
+# Convert val (20% of 10%)
+val_signals, val_lengths, val_labels, val_ids, val_strat_fold = dandelion_to_npz(
+    df_val, "val (20% of 10%)", strat_fold_value=1
+)
+
+# Convert test (official 7K, never touched)
 test_signals, test_lengths, test_labels, test_ids, test_strat_fold = dandelion_to_npz(
-    df_test, "test", strat_fold_value=1
+    df_test, "test (official)", strat_fold_value=2
 )
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -173,29 +185,26 @@ test_signals, test_lengths, test_labels, test_ids, test_strat_fold = dandelion_t
 output_dir = Path("/tmp/dandelion_npz")
 output_dir.mkdir(exist_ok=True)
 
-print("\n[3] Saving NPZ files...")
+print("\n[3] Saving combined NPZ file (train/val/test)...")
 
-train_npz = output_dir / "dandelion_train_10p_signals.npz"
-np.savez(
-    train_npz,
-    ecg_signals=train_signals,
-    lengths=train_lengths,
-    labels=train_labels,
-    ids=train_ids,
-    strat_fold=train_strat_fold,
-)
-print(f"  ✅ {train_npz} ({train_npz.stat().st_size / 1e9:.2f} GB)")
+# Stack all splits
+all_signals = np.vstack([train_signals, val_signals, test_signals])
+all_lengths = np.concatenate([train_lengths, val_lengths, test_lengths])
+all_labels = np.vstack([train_labels, val_labels, test_labels])
+all_ids = np.concatenate([train_ids, val_ids, test_ids])
+all_strat_fold = np.concatenate([train_strat_fold, val_strat_fold, test_strat_fold])
 
-test_npz = output_dir / "dandelion_test_signals.npz"
+combined_npz = output_dir / "dandelion_10p_combined_signals.npz"
 np.savez(
-    test_npz,
-    ecg_signals=test_signals,
-    lengths=test_lengths,
-    labels=test_labels,
-    ids=test_ids,
-    strat_fold=test_strat_fold,
+    combined_npz,
+    ecg_signals=all_signals,
+    lengths=all_lengths,
+    labels=all_labels,
+    ids=all_ids,
+    strat_fold=all_strat_fold,
 )
-print(f"  ✅ {test_npz} ({test_npz.stat().st_size / 1e9:.2f} GB)")
+print(f"  ✅ {combined_npz} ({combined_npz.stat().st_size / 1e9:.2f} GB)")
+print(f"    Train: {len(train_signals):,}, Val: {len(val_signals):,}, Test: {len(test_signals):,}")
 
 print("\n" + "=" * 70)
 print("CONVERSION COMPLETE")
