@@ -80,7 +80,7 @@ NUM_CLASSES = {"ptbxl_superclasses": 5,
                "cpsc2018": 9,
                "cs": 11,
                "csn": 38,
-               "dandelion": 1,
+               "dandelion": 2,  # binary: EF <= 40% (one-hot [B, 2])
 }
 
 logging.basicConfig(level=logging.INFO)
