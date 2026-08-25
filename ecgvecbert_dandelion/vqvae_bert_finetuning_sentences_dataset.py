@@ -217,10 +217,18 @@ def read_ecg_data(dataset_name, use_frac, train_frac=0.7, val_frac=0.1, test_fra
         log.info(f"  val:   {len(val_idx):,} records (not used)")
         log.info(f"  test:  {len(test_idx):,} records")
 
+        train_signals = [signals[i] for i in train_idx]
+        train_labels = [labels[i] for i in train_idx]
+        train_ids = ids[train_idx]
+
+        test_signals = [signals[i] for i in test_idx]
+        test_labels = [labels[i] for i in test_idx]
+        test_ids = ids[test_idx]
+
         return {
-            "train": (signals, labels, ids[train_idx]),
+            "train": (train_ids, train_signals, train_labels),
             "val": ([], [], []),
-            "test": (signals, labels, ids[test_idx]),
+            "test": (test_ids, test_signals, test_labels),
         }
 
     store = read_ecg_signals_from_s3(dataset_name)
