@@ -61,8 +61,8 @@ SOURCE_DIR = "."   # directory containing the training scripts
 IN_CHANNELS = 12
 BATCH_SIZE = 32
 USE_FRAC = [0.01, 0.1, 1.0]
-DATASETS = ["ptbxl_superclasses", "ptbxl_subclasses", "ptbxl_form", "ptbxl_rhythm", "cpsc2018", "cs", "csn", "dandelion"]
-SEEDS = "42,0,1"
+DATASETS = ["dandelion"]
+SEEDS = "42"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 

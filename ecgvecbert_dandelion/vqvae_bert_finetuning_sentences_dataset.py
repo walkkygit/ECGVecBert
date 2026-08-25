@@ -49,7 +49,7 @@ from vqvae_ecg_waveforms_dataset import (
 
 NUM_GENERATION_SHARDS = 4
 
-DATASETS = ["cpsc2018", "csn", "cs", "ptbxl_superclasses", "ptbxl_subclasses", "ptbxl_form", "ptbxl_rhythm", "dandelion"]
+DATASETS = ["dandelion"]
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)

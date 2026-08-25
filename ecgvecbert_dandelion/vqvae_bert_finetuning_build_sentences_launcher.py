@@ -45,7 +45,7 @@ JOB_PREFIX = "vqvae-bert-finetuning-sentences"
 SOURCE_DIR = "."   # directory containing the training scripts
 
 IN_CHANNELS = 12
-USE_FRAC = [0.01, 0.1, 1.0]
+USE_FRAC = [0.1]
 CNN_EMBED_TYPE = 'vqvae_encoder'
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
