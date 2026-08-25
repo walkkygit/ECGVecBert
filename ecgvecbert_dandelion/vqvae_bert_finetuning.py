@@ -68,9 +68,9 @@ CONFIG = {
 
 # ---------------------------------------------------------------------------
 
-prefix_root = "ecgvectbert/vqvae"
-prefix_finetuning = f"{prefix_root}/bert_finetuning"
-prefix_root_bert_model = f"{prefix_root}/bert_pretraining"
+prefix_root = "aruna-files/vqvae"
+prefix_finetuning = "ecgvectbert/vqvae/bert_finetuning"
+prefix_root_bert_model = "aruna-files/vqvae/bert_pretraining"
 prefix_sentences = f"{prefix_finetuning}/sentences"
 
 NUM_CLASSES = {"ptbxl_superclasses": 5,
