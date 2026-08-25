@@ -174,6 +174,10 @@ def read_dandelion_data(use_frac=1.0, data_path=None):
                 ecg_array = np.array(ecg_leads, dtype=np.float32)
                 signal = ecg_array.T
 
+                # Verify shape before appending
+                assert signal.ndim == 2, f"ERROR: signal is {signal.ndim}D, should be 2D (L, 12)"
+                assert signal.shape[1] == 12, f"ERROR: {signal.shape[1]} leads, should be 12"
+
                 label = int(row["label"]) if "label" in row.index else 0
                 ecg_id = str(row["ecg_filename"]) if "ecg_filename" in row.index else f"dandelion_{idx}"
                 split = int(row["__split__"])
