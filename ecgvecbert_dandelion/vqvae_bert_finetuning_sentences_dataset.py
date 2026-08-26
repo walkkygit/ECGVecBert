@@ -47,7 +47,7 @@ from vqvae_ecg_waveforms_dataset import (
     bucket_out,
 )
 
-NUM_GENERATION_SHARDS = 4
+NUM_GENERATION_SHARDS = 16
 
 DATASETS = ["dandelion"]
 
