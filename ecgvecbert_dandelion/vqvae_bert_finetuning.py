@@ -107,8 +107,8 @@ class BERTForClassification(nn.Module):
         logits = self.classifier(pooled_output)
         loss = None
         if labels is not None:
-            loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0, 3.5], device=logits.device))
-            loss = loss_fn(logits, labels.float())
+            pos_weight = torch.tensor([1.0, 3.5], device=logits.device, dtype=logits.dtype)
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels.float(), pos_weight=pos_weight)
         return logits, loss
 
 
