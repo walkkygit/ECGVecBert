@@ -42,8 +42,8 @@ PYTHON_VERSION = "py310"
 # ml.p3.8xlarge  = 4x V100 (16 GB each)
 # ml.p3.16xlarge = 8x V100
 # ml.p4d.24xlarge = 8x A100 (40 GB each)
-# "ml.g5.2xlarge" smaller runs without cnn embeddings
-INSTANCE_TYPE = "ml.g5.8xlarge"          
+# ml.g4dn.8xlarge = 2x T4 (16 GB each, 128GB RAM total) — proven on sentence building
+INSTANCE_TYPE = "ml.g4dn.8xlarge"          
 INSTANCE_COUNT = 1          # nodes; Ray Train manages GPUs on this single node.
                             # NOTE: if you ever raise this above 1, ray.init()
                             # in the training script needs to join a real
