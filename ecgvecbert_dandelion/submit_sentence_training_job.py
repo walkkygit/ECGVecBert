@@ -21,7 +21,7 @@ print(f"Role: {role}")
 # Job configuration
 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 job_name = f"dandelion-sentences-100p-{timestamp}"
-instance_type = "ml.g5.8xlarge"
+instance_type = "ml.g4dn.8xlarge"
 instance_count = 1
 
 # Use the PyTorch Estimator
