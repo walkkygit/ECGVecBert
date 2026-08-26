@@ -47,7 +47,7 @@ from vqvae_ecg_waveforms_dataset import (
     bucket_out,
 )
 
-NUM_GENERATION_SHARDS = 16
+NUM_GENERATION_SHARDS = 64
 
 DATASETS = ["dandelion"]
 
@@ -859,25 +859,36 @@ def get_or_build_finetuning_sentences(
         model_key = f"{model_prefix}/segment_{seg}_nleads_{in_channels}/vqvae_model_{seg}.pkl"
         models[seg] = _load_model_from_s3(model_key)
 
-    seg_split_results, codebook_sizes = assign_finetuning_codebook_indices(
-        models=models, device=device, splits=splits, in_channels=in_channels,
-        cnn_embed_type=cnn_embed_type, cnn_embed_scale=cnn_embed_scale,
-        rocket_extractors=rocket_extractors, batch_size=batch_size
-    )
-
-    # Restructure {seg: {split_name: data}} → {split_name: {seg: data}}
-    all_assignments: dict[str, dict] = defaultdict(dict)
-    for seg, split_data in seg_split_results.items():
-        for split_name, data in split_data.items():
-            all_assignments[split_name][seg] = data
-
+    # Encode → Build → Save per split (incremental, memory-efficient)
     for split_name in splits_needed:
+        log.info(f"[Incremental] Encoding {split_name} split...")
+
+        # Encode only this split
+        seg_split_results, codebook_sizes = assign_finetuning_codebook_indices(
+            models=models, device=device, splits={split_name: splits[split_name]}, in_channels=in_channels,
+            cnn_embed_type=cnn_embed_type, cnn_embed_scale=cnn_embed_scale,
+            rocket_extractors=rocket_extractors, batch_size=batch_size
+        )
+
+        # Restructure {seg: {split_name: data}} → {split_name: {seg: data}}
+        all_assignments: dict[str, dict] = defaultdict(dict)
+        for seg, split_data in seg_split_results.items():
+            for split, data in split_data.items():
+                all_assignments[split][seg] = data
+
+        # Build and save immediately for this split
+        log.info(f"[Incremental] Building sentences for {split_name}...")
         sentences = build_finetuning_beat_sentences(
             assignments=all_assignments[split_name],
             codebook_sizes=codebook_sizes,
             seed=seed,
         )
+        log.info(f"[Incremental] Saving {split_name} shards to S3...")
         save_finetuning_sentences(sentences, dataset_name, split_name, use_frac, num_shards=num_shards)
+
+        # Free memory before next split
+        del seg_split_results, all_assignments, sentences
+        log.info(f"[Incremental] {split_name} complete. Memory cleared.")
 
 
 class FinetuningBeatSentenceDataset(Dataset):
