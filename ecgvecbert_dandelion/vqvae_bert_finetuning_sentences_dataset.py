@@ -550,7 +550,15 @@ def assign_finetuning_codebook_indices(
                 "labels":        np.array(result["labels"], dtype=np.float32),
             }
             if result["embeddings"]:
-                split_out["embeddings"] = np.concatenate(result["embeddings"])
+                embs = np.concatenate(result["embeddings"])
+                # Check for NaN/Inf in embeddings
+                nan_count = np.isnan(embs).sum()
+                inf_count = np.isinf(embs).sum()
+                if nan_count > 0 or inf_count > 0:
+                    log.warning(f"  [{seg}] {split_name}: found {nan_count} NaN and {inf_count} Inf values in {embs.shape} embeddings")
+                    # Replace NaN/Inf with 0 to prevent serialization issues
+                    embs = np.nan_to_num(embs, nan=0.0, posinf=0.0, neginf=0.0)
+                split_out["embeddings"] = embs
             n = len(split_out["beat_idxs"])
             log.info(f"  [{seg}] {split_name}: {n:,} beats encoded across {len(X):,} ECGs")
             assignments[seg][split_name] = split_out
@@ -694,7 +702,14 @@ def build_finetuning_beat_sentences(
         "vocab_offsets":   vocab_offsets,
     }
     if has_embeddings:
-        result["cnn_embeddings"] = np.stack(cnn_list)
+        cnn_array = np.stack(cnn_list)
+        # Validate CNN embeddings before returning
+        nan_count = np.isnan(cnn_array).sum()
+        inf_count = np.isinf(cnn_array).sum()
+        log.info(f"CNN embeddings: shape={cnn_array.shape}, dtype={cnn_array.dtype}, NaN={nan_count}, Inf={inf_count}")
+        if nan_count > 0 or inf_count > 0:
+            log.warning(f"Found {nan_count} NaN and {inf_count} Inf in {len(cnn_list)} CNN embedding arrays")
+        result["cnn_embeddings"] = cnn_array
     return result
 
 
