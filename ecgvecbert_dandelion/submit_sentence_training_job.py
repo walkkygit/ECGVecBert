@@ -8,6 +8,7 @@ import sagemaker
 from sagemaker.pytorch import PyTorch
 from sagemaker.estimator import Estimator
 import os
+from datetime import datetime
 
 # Initialize SageMaker session
 sess = sagemaker.Session()
@@ -18,7 +19,8 @@ print(f"Region: {region}")
 print(f"Role: {role}")
 
 # Job configuration
-job_name = "dandelion-sentences-100p"
+timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+job_name = f"dandelion-sentences-100p-{timestamp}"
 instance_type = "ml.g4dn.2xlarge"
 instance_count = 1
 
