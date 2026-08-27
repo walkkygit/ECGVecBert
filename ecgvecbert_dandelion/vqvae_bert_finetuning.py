@@ -83,6 +83,9 @@ NUM_CLASSES = {"ptbxl_superclasses": 5,
                "dandelion": 2,  # binary: EF <= 40% (one-hot [B, 2])
 }
 
+# Dandelion cross-entropy class weights [normal EF, low EF]. 1.9 chosen by user (3.5 = inverse freq was too strong).
+DANDELION_CLASS_WEIGHT = [1.0, 1.9]
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
@@ -109,7 +112,9 @@ class BERTForClassification(nn.Module):
         loss = None
         if labels is not None:
             if self.dataset_name == "dandelion":
-                loss = torch.nn.functional.cross_entropy(logits, labels.float())
+                # class weight: upweight low EF (class 1); train ratio is 78/22 (inverse freq ≈ 3.5)
+                class_weight = torch.tensor(DANDELION_CLASS_WEIGHT, device=logits.device, dtype=logits.dtype)
+                loss = torch.nn.functional.cross_entropy(logits, labels.float(), weight=class_weight)
             else:
                 loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
         return logits, loss
