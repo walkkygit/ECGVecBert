@@ -192,7 +192,13 @@ def evaluate_metrics(dataset_name: str, model, loader, use_cnn_features: bool, n
         record_true[i] = all_labels[mask][0]  # one-hot/multi-hot vector, identical across a record's sentences
         # majority vote per class across this record's sentence-level predictions
         vote_counts = all_preds[mask].sum(axis=0)
-        record_pred[i] = (vote_counts > (mask.sum() / 2)).astype(np.int64)
+        if dataset_name == "dandelion":
+            # single-label binary: low EF (class 1) only if a strict majority of sentences say so,
+            # otherwise normal EF (class 0) — ties go to normal EF, never [0, 0]
+            low_ef = vote_counts[1] > (mask.sum() / 2)
+            record_pred[i] = np.array([0, 1] if low_ef else [1, 0], dtype=np.int64)
+        else:
+            record_pred[i] = (vote_counts > (mask.sum() / 2)).astype(np.int64)
         record_probs[i] = all_probs[mask].mean(axis=0)
 
     record_acc = accuracy_score(record_true, record_pred)
