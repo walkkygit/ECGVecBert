@@ -42,7 +42,7 @@ PYTHON_VERSION = "py310"
 # ml.p3.8xlarge  = 4x V100 (16 GB each)
 # ml.p3.16xlarge = 8x V100
 # ml.p4d.24xlarge = 8x A100 (40 GB each)
-# ml.g4dn.8xlarge = 2x T4 (16 GB each, 128GB RAM total) — proven on sentence building
+# ml.g4dn.8xlarge = 1x T4 (16 GB), 128GB RAM — proven on sentence building; GPU_PER_NODE must stay 1
 INSTANCE_TYPE = "ml.g4dn.8xlarge"          
 INSTANCE_COUNT = 1          # nodes; Ray Train manages GPUs on this single node.
                             # NOTE: if you ever raise this above 1, ray.init()
