@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import s3fs
 from pathlib import Path
+from sklearn.model_selection import train_test_split
 
 # Settings
 S3_BUCKET = "walkky-ml"
@@ -56,12 +57,15 @@ with s3_fs.open(merged_path, "rb") as f:
     df_merged = pd.read_feather(f)
 print(f"  Merged (100%): {len(df_merged):,} records")
 
-# Split into 80% train / 20% val
-n_train = int(len(df_merged) * 0.8)
-df_train = df_merged[:n_train]
-df_val = df_merged[n_train:]
-print(f"  Train (80%): {len(df_train):,} records")
-print(f"  Val (20%): {len(df_val):,} records")
+# Split into 80% train / 20% val WITH STRATIFICATION (preserve 78/22 ratio)
+df_train, df_val = train_test_split(
+    df_merged,
+    test_size=0.2,
+    stratify=df_merged['label'],
+    random_state=42
+)
+print(f"  Train (80%, stratified): {len(df_train):,} records")
+print(f"  Val (20%, stratified): {len(df_val):,} records")
 
 # Test data (official, full)
 test_path = os.path.join(data_path, "df_fullz_testing.feather")
@@ -122,9 +126,8 @@ def dandelion_to_npz(df, split_name="train", strat_fold_value=0):
             elif actual_len > MAX_LEN:
                 ecg_signal = ecg_signal[:MAX_LEN]
 
-            # Binary label: 1 if EF <= 40%, 0 otherwise
-            ef_value = float(row["label"]) if "label" in row.index else 50
-            binary_label = 1 if ef_value <= 40 else 0
+            # Binary label: use label directly (already 0 or 1)
+            binary_label = int(row["label"]) if "label" in row.index else 0
 
             # One-hot encode: [1, 0] for class 0, [0, 1] for class 1
             one_hot = np.array([1, 0] if binary_label == 0 else [0, 1], dtype=np.int32)
