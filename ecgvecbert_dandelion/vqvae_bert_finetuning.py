@@ -14,7 +14,7 @@ import torch.distributed as dist
 from torch.optim import AdamW
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
 from peft.tuners.lora import LoraLayer
-from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, recall_score, precision_score
 import ray
 import ray.train
 import ray.train.torch as ray_torch
@@ -173,6 +173,14 @@ def evaluate_metrics(dataset_name: str, model, loader, use_cnn_features: bool, n
     avg_loss = total_loss / max(1, num_batches)
     macro_auroc = _macro_auroc(all_labels, all_probs, num_classes, dataset_name)
 
+    # For Dandelion: add sensitivity, specificity, precision
+    if num_classes == 2:
+        sensitivity = recall_score(all_labels[:, 1], all_preds[:, 1], zero_division=0)  # recall for class 1 (low EF)
+        specificity = recall_score(all_labels[:, 0], all_preds[:, 0], zero_division=0)  # recall for class 0 (normal EF)
+        precision = precision_score(all_labels[:, 1], all_preds[:, 1], zero_division=0)  # precision for class 1 (low EF)
+    else:
+        sensitivity = specificity = precision = 0.0
+
     # ---- record (ecg_idx)-level aggregation ----
     unique_ecgs = np.unique(all_ecg_idxs)
     record_true  = np.empty((len(unique_ecgs), num_classes), dtype=np.int64)
@@ -191,10 +199,19 @@ def evaluate_metrics(dataset_name: str, model, loader, use_cnn_features: bool, n
     record_f1 = f1_score(record_true, record_pred, average="macro")
     record_auroc = _macro_auroc(record_true, record_probs, num_classes, f"{dataset_name} (record-level)")
 
+    # For Dandelion: record-level sensitivity, specificity, precision
+    if num_classes == 2:
+        record_sensitivity = recall_score(record_true[:, 1], record_pred[:, 1], zero_division=0)
+        record_specificity = recall_score(record_true[:, 0], record_pred[:, 0], zero_division=0)
+        record_precision = precision_score(record_true[:, 1], record_pred[:, 1], zero_division=0)
+    else:
+        record_sensitivity = record_specificity = record_precision = 0.0
+
     return {
         "loss": avg_loss,
-        "acc": acc, "f1": macro_f1, "auroc": macro_auroc,
+        "acc": acc, "f1": macro_f1, "auroc": macro_auroc, "sensitivity": sensitivity, "specificity": specificity, "precision": precision,
         "record_acc": record_acc, "record_f1": record_f1, "record_auroc": record_auroc,
+        "record_sensitivity": record_sensitivity, "record_specificity": record_specificity, "record_precision": record_precision,
     }
 
 
@@ -652,14 +669,26 @@ def train_loop_per_worker(loop_config: dict) -> None:
             log.info(f"Epoch {epoch + 1}/{num_epochs} ({(end_time - start_time) / 60.0:.2f} min) "
                      #f"lr={scheduler.get_last_lr()[0]:.2e}")
                      f"lr={optimizer.param_groups[0]['lr']}")
-            log.info(f"  Train: loss={train_metrics['loss']:.4f} acc={train_metrics['acc']:.4f} "
-                     f"f1={train_metrics['f1']:.4f} AUROC={train_metrics['auroc']:.4f} "
-                     f"| record_acc={train_metrics['record_acc']:.4f} record_f1={train_metrics['record_f1']:.4f} "
-                     f" record_AUROC={train_metrics['record_auroc']:.4f}")
-            log.info(f"  Val:   loss={val_metrics['loss']:.4f} acc={val_metrics['acc']:.4f} "
-                     f"f1={val_metrics['f1']:.4f} AUROC={val_metrics['auroc']:.4f} "
-                     f"| record_acc={val_metrics['record_acc']:.4f} record_f1={val_metrics['record_f1']:.4f} "
-                     f" record_AUROC={val_metrics['record_auroc']:.4f}")
+            if num_classes == 2:
+                log.info(f"  Train: loss={train_metrics['loss']:.4f} acc={train_metrics['acc']:.4f} "
+                         f"f1={train_metrics['f1']:.4f} AUROC={train_metrics['auroc']:.4f} "
+                         f"Sens={train_metrics['sensitivity']:.4f} Spec={train_metrics['specificity']:.4f} Prec={train_metrics['precision']:.4f} "
+                         f"| record_acc={train_metrics['record_acc']:.4f} record_f1={train_metrics['record_f1']:.4f} "
+                         f"record_AUROC={train_metrics['record_auroc']:.4f}")
+                log.info(f"  Val:   loss={val_metrics['loss']:.4f} acc={val_metrics['acc']:.4f} "
+                         f"f1={val_metrics['f1']:.4f} AUROC={val_metrics['auroc']:.4f} "
+                         f"Sens={val_metrics['sensitivity']:.4f} Spec={val_metrics['specificity']:.4f} Prec={val_metrics['precision']:.4f} "
+                         f"| record_acc={val_metrics['record_acc']:.4f} record_f1={val_metrics['record_f1']:.4f} "
+                         f"record_AUROC={val_metrics['record_auroc']:.4f}")
+            else:
+                log.info(f"  Train: loss={train_metrics['loss']:.4f} acc={train_metrics['acc']:.4f} "
+                         f"f1={train_metrics['f1']:.4f} AUROC={train_metrics['auroc']:.4f} "
+                         f"| record_acc={train_metrics['record_acc']:.4f} record_f1={train_metrics['record_f1']:.4f} "
+                         f" record_AUROC={train_metrics['record_auroc']:.4f}")
+                log.info(f"  Val:   loss={val_metrics['loss']:.4f} acc={val_metrics['acc']:.4f} "
+                         f"f1={val_metrics['f1']:.4f} AUROC={val_metrics['auroc']:.4f} "
+                         f"| record_acc={val_metrics['record_acc']:.4f} record_f1={val_metrics['record_f1']:.4f} "
+                         f" record_AUROC={val_metrics['record_auroc']:.4f}")
         
         ray.train.report({
             "epoch": epoch + 1,
