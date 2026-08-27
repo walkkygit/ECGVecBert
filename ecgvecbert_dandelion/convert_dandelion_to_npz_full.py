@@ -152,7 +152,7 @@ def dandelion_to_npz(df, split_name="train", strat_fold_value=0):
     ecg_signals = np.stack(ecg_signals_list, axis=0)  # (N, MAX_LEN, 12)
     lengths = np.array(lengths_list, dtype=np.int32)  # (N,)
     labels = np.stack(labels_list, axis=0)  # (N, 2) — one-hot encoded
-    ids = np.array(ids_list, dtype='U26')  # (N,)
+    ids = np.array(ids_list, dtype=str)  # (N,) — dtype=str keeps full filename (U26 truncated to 26 chars)
     strat_fold = np.array(strat_fold_list, dtype=np.int32)  # (N,)
 
     print(f"  ✅ Converted {len(ecg_signals):,} records")
