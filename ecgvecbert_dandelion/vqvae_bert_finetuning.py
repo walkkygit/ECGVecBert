@@ -134,8 +134,15 @@ def evaluate_metrics(dataset_name: str, model, loader, use_cnn_features: bool, n
             total_loss += loss.item()
             num_batches += 1
 
-            probs = torch.sigmoid(logits)          # multilabel
-            preds = (probs > 0.5).long()           # multilabel
+            if dataset_name == "dandelion":
+                probs = torch.softmax(logits, dim=1)    # single-label: softmax
+                preds = torch.argmax(probs, dim=1)      # single-label: argmax → one-hot
+                preds_onehot = torch.nn.functional.one_hot(preds, num_classes=num_classes).long()
+                probs = probs  # keep as (B, 2) for AUROC
+                preds = preds_onehot  # convert to (B, 2) one-hot
+            else:
+                probs = torch.sigmoid(logits)          # multilabel
+                preds = (probs > 0.5).long()           # multilabel
 
             all_labels.append(labels.detach().cpu().numpy())
             all_probs.append(probs.detach().cpu().numpy())
