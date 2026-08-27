@@ -282,8 +282,8 @@ def load_pretrained_bert_weights(bert: BERT, use_cnn_features: bool, s3_fs: s3fs
         log.info(f"BERT total parameters: {total_params:,} ")
 
 
-def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim: int, num_classes: int, lora_r: int, lora_alpha: int, lora_dropout: float, 
-                         dropout: float, prefix_bert_model: str) -> nn.Module:
+def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim: int, num_classes: int, lora_r: int, lora_alpha: int, lora_dropout: float,
+                         dropout: float, prefix_bert_model: str, dataset_name: str = "ptbxl_superclasses") -> nn.Module:
     """Build a BERTForClassification model, load pretrained BERT weights, and wrap it with LoRA."""
     d_model  = PRETRAIN_CONFIG["d_model"]
     n_layers = PRETRAIN_CONFIG["n_layers"]
@@ -301,7 +301,11 @@ def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim:
     _s3 = s3fs.S3FileSystem()
     load_pretrained_bert_weights(bert, use_cnn_features, _s3, prefix_bert_model)
 
-    model = BERTForClassification(bert, d_model, num_classes, dropout)
+    # dataset_name selects the loss: weighted cross-entropy for dandelion, BCE for multilabel
+    model = BERTForClassification(bert, d_model, num_classes, dropout, dataset_name=dataset_name)
+    if is_main_process():
+        loss_desc = f"weighted cross-entropy, class_weight={DANDELION_CLASS_WEIGHT}" if dataset_name == "dandelion" else "BCEWithLogits (multilabel)"
+        log.info(f"[{dataset_name}] Loss function: {loss_desc}")
 
     lora_config = LoraConfig(
         r=lora_r,
@@ -575,7 +579,8 @@ def train_loop_per_worker(loop_config: dict) -> None:
             f"use_frac={use_frac} "
         )
 
-    model = build_finetune_model(vocab_size, use_cnn_features, cnn_embed_dim, num_classes, lora_r, lora_alpha, lora_dropout, dropout, prefix_bert_model)
+    model = build_finetune_model(vocab_size, use_cnn_features, cnn_embed_dim, num_classes, lora_r, lora_alpha, lora_dropout, dropout, prefix_bert_model,
+                                 dataset_name=dataset_name)
     model = ray_torch.prepare_model(model)
 
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
