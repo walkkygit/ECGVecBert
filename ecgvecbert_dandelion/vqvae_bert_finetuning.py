@@ -441,6 +441,8 @@ def save_test_metrics_npz(
     dataset_name: str, use_frac: float, seed: int,
     test_loss, test_acc, test_f1, test_auroc,
     test_record_acc, test_record_f1, test_record_auroc, s3_fs: s3fs.S3FileSystem,
+    test_sensitivity=0.0, test_specificity=0.0, test_precision=0.0,
+    test_record_sensitivity=0.0, test_record_specificity=0.0, test_record_precision=0.0,
 ) -> None:
     prefix_out = f"{prefix_finetuning}/{dataset_name}"
     key = f"{prefix_out}/finetune_test_metrics_{dataset_name}_{use_frac}.npz"
@@ -451,8 +453,17 @@ def save_test_metrics_npz(
     fields = {
         "test_loss": test_loss, "test_accuracy": test_acc, "test_f1": test_f1, "test_auroc": test_auroc,
         "test_record_accuracy": test_record_acc, "test_record_f1": test_record_f1, "test_record_auroc": test_record_auroc,
+        # Dandelion (binary): sensitivity / specificity / precision for the low-EF class
+        "test_sensitivity": test_sensitivity, "test_specificity": test_specificity, "test_precision": test_precision,
+        "test_record_sensitivity": test_record_sensitivity, "test_record_specificity": test_record_specificity,
+        "test_record_precision": test_record_precision,
     }
     values = {name: existing.get(name, np.array([])).tolist() for name in fields}
+    # Fields added later (e.g. sensitivity) are absent from older files: pad with NaN so
+    # every column stays aligned with `seeds`.
+    for name in fields:
+        if len(values[name]) < len(seeds):
+            values[name] += [float("nan")] * (len(seeds) - len(values[name]))
 
     if seed in seeds:
         idx = seeds.index(seed)          # rerun of an existing seed — overwrite in place
@@ -760,19 +771,30 @@ def train_loop_per_worker(loop_config: dict) -> None:
     test_auroc = test_metrics["auroc"]
     test_record_acc = test_metrics["record_acc"]
     test_record_f1 = test_metrics["record_f1"]
-    test_record_auroc = test_metrics["record_auroc"] 
+    test_record_auroc = test_metrics["record_auroc"]
+    test_sens, test_spec, test_prec = test_metrics["sensitivity"], test_metrics["specificity"], test_metrics["precision"]
+    test_record_sens = test_metrics["record_sensitivity"]
+    test_record_spec = test_metrics["record_specificity"]
+    test_record_prec = test_metrics["record_precision"]
 
     ray.train.report({
             "test_loss": test_loss, "test_acc": test_acc, "test_f1": test_f1, "test_auroc": test_auroc,
             "test_record_acc": test_record_acc, "test_record_f1": test_record_f1, "test_record_auroc": test_record_auroc,
+            "test_sensitivity": test_sens, "test_specificity": test_spec, "test_precision": test_prec,
+            "test_record_sensitivity": test_record_sens, "test_record_specificity": test_record_spec,
+            "test_record_precision": test_record_prec,
         })
 
     if is_main_process():
         log.info(f"Test: loss={test_loss:.4f} acc={test_acc:.4f} "
                  f"f1={test_f1:.4f} AUROC={test_auroc:.4f} "
-                 f"| record_acc={test_record_acc:.4f} record_f1={test_record_f1:.4f} record_AUROC={test_record_auroc:.4f}")
-        save_test_metrics_npz(dataset_name, use_frac, loop_config["seed"], test_loss, test_acc, test_f1, test_auroc, 
-                              test_record_acc, test_record_f1, test_record_auroc, _s3)
+                 f"Sens={test_sens:.4f} Spec={test_spec:.4f} Prec={test_prec:.4f} "
+                 f"| record_acc={test_record_acc:.4f} record_f1={test_record_f1:.4f} record_AUROC={test_record_auroc:.4f} "
+                 f"record_Sens={test_record_sens:.4f} record_Spec={test_record_spec:.4f} record_Prec={test_record_prec:.4f}")
+        save_test_metrics_npz(dataset_name, use_frac, loop_config["seed"], test_loss, test_acc, test_f1, test_auroc,
+                              test_record_acc, test_record_f1, test_record_auroc, _s3,
+                              test_sens, test_spec, test_prec,
+                              test_record_sens, test_record_spec, test_record_prec)
 
 
 def run_finetuning(seeds: list[int] = None):
