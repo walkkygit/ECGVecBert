@@ -92,13 +92,14 @@ log = logging.getLogger(__name__)
 class BERTForClassification(nn.Module):
     """Wrap pre-trained BERT with a softmax classifier head."""
 
-    def __init__(self, base_model: BERT, d_model: int, num_classes: int, dropout: float):
+    def __init__(self, base_model: BERT, d_model: int, num_classes: int, dropout: float, dataset_name: str = "ptbxl_superclasses"):
         super().__init__()
         self.bert = base_model
         self.classifier = nn.Linear(d_model, num_classes)
         self.fc_classifier = nn.Linear(d_model, d_model)
         self.activation = nn.Tanh()
         self.dropout = nn.Dropout(dropout)
+        self.dataset_name = dataset_name
 
     def forward(self, input_ids, use_cnn_features, cnn_features, labels=None):
         pooled_output = self.bert(input_ids, use_cnn_features, cnn_features)  # [B, d_model]
@@ -107,8 +108,10 @@ class BERTForClassification(nn.Module):
         logits = self.classifier(pooled_output)
         loss = None
         if labels is not None:
-            pos_weight = torch.tensor([1.0, 3.5], device=logits.device, dtype=logits.dtype)
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels.float(), pos_weight=pos_weight)
+            if self.dataset_name == "dandelion":
+                loss = torch.nn.functional.cross_entropy(logits, labels.float())
+            else:
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
         return logits, loss
 
 
