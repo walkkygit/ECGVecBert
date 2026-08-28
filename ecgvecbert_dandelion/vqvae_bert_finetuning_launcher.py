@@ -21,6 +21,7 @@ Requirements:
 import itertools
 import argparse
 import logging
+import re
 import boto3
 import sagemaker
 from sagemaker.pytorch import PyTorch
@@ -73,7 +74,7 @@ def get_session_and_role():
     return sm_session, ROLE_ARN
 
 
-def make_estimator(sm_session, ROLE_ARN, hyperparameters) -> PyTorch:
+def make_estimator(sm_session, ROLE_ARN, hyperparameters, instance_type: str = None, job_tag: str = None) -> PyTorch:
     """
     Build a SageMaker PyTorch estimator that runs a single process per node.
     Ray Train (inside vqvae_bert_finetuning.py) is responsible for spawning
@@ -82,13 +83,17 @@ def make_estimator(sm_session, ROLE_ARN, hyperparameters) -> PyTorch:
     in_channels = hyperparameters["in_channels"]
     dataset = hyperparameters["dataset"]
     use_frac = hyperparameters["use_frac"]
-    job_name = f"{JOB_PREFIX}-{in_channels}-{dataset}-{use_frac:.2f}".replace('.', 'p').replace('_', '-')
+    if job_tag:
+        # sweep run: short, console-readable name (SageMaker appends a ~24-char timestamp; limit is 63)
+        job_name = re.sub(r"[^a-zA-Z0-9-]", "-", f"ft-{dataset}-{job_tag}")[:38].strip("-")
+    else:
+        job_name = f"{JOB_PREFIX}-{in_channels}-{dataset}-{use_frac:.2f}".replace('.', 'p').replace('_', '-')
 
     estimator = PyTorch(
         entry_point="vqvae_bert_finetuning.py",
         source_dir=SOURCE_DIR,
         role=ROLE_ARN,
-        instance_type=INSTANCE_TYPE,
+        instance_type=instance_type or INSTANCE_TYPE,
         instance_count=INSTANCE_COUNT,
         framework_version=PYTORCH_VERSION,
         py_version=PYTHON_VERSION,
@@ -113,7 +118,10 @@ def make_estimator(sm_session, ROLE_ARN, hyperparameters) -> PyTorch:
     return estimator
 
 
-def launch(in_channels: int, batch_size: int, use_frac: float, dataset: str, seeds: str, num_ray_workers: int):
+def launch(in_channels: int, batch_size: int, use_frac: float, dataset: str, seeds: str, num_ray_workers: int,
+           extra_hp: dict = None, instance_type: str = None, job_tag: str = None):
+    """extra_hp: additional CLI hyperparameters forwarded verbatim to vqvae_bert_finetuning.py
+    (e.g. {"class_weight": 2.5, "lr": 3e-5, "target_modules": "W_Q,W_K,W_V"}). None values are skipped."""
     sm_session, ROLE_ARN = get_session_and_role()
     hyperparameters = {
         "in_channels": in_channels,
@@ -124,11 +132,14 @@ def launch(in_channels: int, batch_size: int, use_frac: float, dataset: str, see
     }
     if seeds is not None:
         hyperparameters["seeds"] = seeds
-    estimator = make_estimator(sm_session, ROLE_ARN, hyperparameters)
+    for k, v in (extra_hp or {}).items():
+        if v is not None:
+            hyperparameters[k] = v
+    estimator = make_estimator(sm_session, ROLE_ARN, hyperparameters, instance_type=instance_type, job_tag=job_tag)
 
     log.info(f"Launching VQ-VAE BERT finetuning job (Ray-managed, single process/node)"
-             f" on {INSTANCE_COUNT}x {INSTANCE_TYPE} ({GPU_PER_NODE} GPUs/node, "
-             f"num_ray_workers={num_ray_workers})...")
+             f" on {INSTANCE_COUNT}x {instance_type or INSTANCE_TYPE} ({GPU_PER_NODE} GPUs/node, "
+             f"num_ray_workers={num_ray_workers}) hyperparameters={hyperparameters}")
 
     estimator.fit(wait=False)
 
@@ -151,6 +162,18 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", type=str, default=None, help="Comma-separated string of seeds")
     parser.add_argument("--num_ray_workers", type=int, default=None,
                         help="num ray workers (1 per GPU)")
+    # Dandelion sweep knobs, forwarded to vqvae_bert_finetuning.py (None = keep its CONFIG default)
+    parser.add_argument("--class_weight", type=float, default=None, help="loss weight for the low-EF class")
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--lora_r", type=int, default=None)
+    parser.add_argument("--lora_dropout", type=float, default=None)
+    parser.add_argument("--dropout", type=float, default=None, help="classifier-head dropout")
+    parser.add_argument("--weight_decay", type=float, default=None)
+    parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument("--target_modules", type=str, default=None, help="e.g. 'W_Q,W_K,W_V' for attention-only LoRA")
+    parser.add_argument("--run_tag", type=str, default=None, help="output-file suffix ('' = none; default auto)")
+    parser.add_argument("--instance_type", type=str, default=None,
+                        help=f"override {INSTANCE_TYPE}; use ml.g5.8xlarge (quota 32) to run sweep jobs in parallel")
 
     parser.add_argument("--all", action="store_true",
                         help="Launch one job per fraction in USE_FRAC per dataset in DATASETS")
@@ -160,12 +183,16 @@ if __name__ == "__main__":
     batch_size = args.batch_size or BATCH_SIZE
     num_ray_workers = args.num_ray_workers or GPU_PER_NODE
     seeds = args.seeds or SEEDS
+    extra_hp = {k: getattr(args, k) for k in ["class_weight", "lr", "lora_r", "lora_dropout", "dropout",
+                                              "weight_decay", "patience", "target_modules", "run_tag"]}
 
     if args.all:
         for usefrac, dataset in itertools.product(USE_FRAC, DATASETS):
-            launch(in_channels, batch_size, usefrac, dataset, seeds, num_ray_workers)
+            launch(in_channels, batch_size, usefrac, dataset, seeds, num_ray_workers,
+                   extra_hp=extra_hp, instance_type=args.instance_type)
     else:
         usefrac = args.use_frac if args.use_frac is not None else USE_FRAC[-1]
         dataset = args.dataset if args.dataset is not None else DATASETS[0]
-        launch(in_channels, batch_size, usefrac, dataset, seeds, num_ray_workers)
+        launch(in_channels, batch_size, usefrac, dataset, seeds, num_ray_workers,
+               extra_hp=extra_hp, instance_type=args.instance_type)
         # ptbxl with usefrac 1.0 if no arguments specified

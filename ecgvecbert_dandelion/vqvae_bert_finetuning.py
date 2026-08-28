@@ -63,7 +63,22 @@ CONFIG = {
     "target_modules":  ["W_Q", "W_V", "W_K", "fc", "fc1", "fc2"],
     # ["W_Q", "W_V", "W_K", "fc", "fc1", "fc2"], ["W_Q", "W_V", "W_K"], ["W_Q", "W_V", "W_K", "fc"], ["W_Q", "W_V"]
     "modules_to_save": ["classifier", "fc_classifier"],   # ["classifier", "fc_classifier"], ["classifier"]
+    # Dandelion sweep knobs (CLI-overridable): low-EF class weight; run_tag = suffix on every output file so
+    # sweep runs don't overwrite each other ("" = auto-generate from the hyperparameters for dandelion)
+    "class_weight": 1.9,
+    "run_tag": "",
 }
+
+
+def make_run_tag(cfg: dict) -> str:
+    """Filename suffix identifying one hyperparameter configuration, e.g. cw1.9_lr1e-04_r8_do0.1_ld0.1_wd1e-04_tmall."""
+    tm = "all" if "fc1" in cfg["target_modules"] else "attn"
+    return (f"cw{cfg['class_weight']}_lr{cfg['lr']:.0e}_r{cfg['lora_r']}_do{cfg['dropout']}"
+            f"_ld{cfg['lora_dropout']}_wd{cfg['weight_decay']:.0e}_tm{tm}")
+
+
+def _sfx(run_tag: str) -> str:
+    return f"_{run_tag}" if run_tag else ""
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +114,8 @@ log = logging.getLogger(__name__)
 class BERTForClassification(nn.Module):
     """Wrap pre-trained BERT with a softmax classifier head."""
 
-    def __init__(self, base_model: BERT, d_model: int, num_classes: int, dropout: float, dataset_name: str = "ptbxl_superclasses"):
+    def __init__(self, base_model: BERT, d_model: int, num_classes: int, dropout: float, dataset_name: str = "ptbxl_superclasses",
+                 class_weight: list | None = None):
         super().__init__()
         self.bert = base_model
         self.classifier = nn.Linear(d_model, num_classes)
@@ -107,6 +123,8 @@ class BERTForClassification(nn.Module):
         self.activation = nn.Tanh()
         self.dropout = nn.Dropout(dropout)
         self.dataset_name = dataset_name
+        # [normal EF, low EF] weights for the dandelion cross-entropy (ignored for multilabel datasets)
+        self.class_weight = list(class_weight) if class_weight is not None else list(DANDELION_CLASS_WEIGHT)
 
     def forward(self, input_ids, use_cnn_features, cnn_features, labels=None):
         pooled_output = self.bert(input_ids, use_cnn_features, cnn_features)  # [B, d_model]
@@ -117,7 +135,7 @@ class BERTForClassification(nn.Module):
         if labels is not None:
             if self.dataset_name == "dandelion":
                 # class weight: upweight low EF (class 1); train ratio is 78/22 (inverse freq ≈ 3.5)
-                class_weight = torch.tensor(DANDELION_CLASS_WEIGHT, device=logits.device, dtype=logits.dtype)
+                class_weight = torch.tensor(self.class_weight, device=logits.device, dtype=logits.dtype)
                 loss = torch.nn.functional.cross_entropy(logits, labels.float(), weight=class_weight)
             else:
                 loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
@@ -291,7 +309,13 @@ def load_pretrained_bert_weights(bert: BERT, use_cnn_features: bool, s3_fs: s3fs
 
 
 def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim: int, num_classes: int, lora_r: int, lora_alpha: int, lora_dropout: float,
-                         dropout: float, prefix_bert_model: str, dataset_name: str = "ptbxl_superclasses") -> nn.Module:
+                         dropout: float, prefix_bert_model: str, dataset_name: str = "ptbxl_superclasses",
+                         class_weight: list | None = None, target_modules: list | None = None,
+                         modules_to_save: list | None = None) -> nn.Module:
+    # target_modules / modules_to_save default to CONFIG; passed explicitly from the Ray worker because CLI
+    # overrides to CONFIG made in __main__ are not visible inside Ray worker processes
+    target_modules = list(target_modules) if target_modules is not None else list(CONFIG["target_modules"])
+    modules_to_save = list(modules_to_save) if modules_to_save is not None else list(CONFIG["modules_to_save"])
     """Build a BERTForClassification model, load pretrained BERT weights, and wrap it with LoRA."""
     d_model  = PRETRAIN_CONFIG["d_model"]
     n_layers = PRETRAIN_CONFIG["n_layers"]
@@ -310,17 +334,19 @@ def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim:
     load_pretrained_bert_weights(bert, use_cnn_features, _s3, prefix_bert_model)
 
     # dataset_name selects the loss: weighted cross-entropy for dandelion, BCE for multilabel
-    model = BERTForClassification(bert, d_model, num_classes, dropout, dataset_name=dataset_name)
+    model = BERTForClassification(bert, d_model, num_classes, dropout, dataset_name=dataset_name, class_weight=class_weight)
     if is_main_process():
-        loss_desc = f"weighted cross-entropy, class_weight={DANDELION_CLASS_WEIGHT}" if dataset_name == "dandelion" else "BCEWithLogits (multilabel)"
+        loss_desc = f"weighted cross-entropy, class_weight={model.class_weight}" if dataset_name == "dandelion" else "BCEWithLogits (multilabel)"
         log.info(f"[{dataset_name}] Loss function: {loss_desc}")
+        log.info(f"[{dataset_name}] LoRA: r={lora_r} alpha={lora_alpha} lora_dropout={lora_dropout} "
+                 f"target_modules={target_modules} | head dropout={dropout}")
 
     lora_config = LoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
-        target_modules=CONFIG["target_modules"],  # W_Q/W_V/W_K (BERT attention) — LoRA fine-tuned
-        modules_to_save=CONFIG["modules_to_save"],  # classifier/fc_classifier (head) — trained fully, not via LoRA
+        target_modules=target_modules,  # W_Q/W_V/W_K (BERT attention) — LoRA fine-tuned
+        modules_to_save=modules_to_save,  # classifier/fc_classifier (head) — trained fully, not via LoRA
         bias="none",
     )
     peft_model = get_peft_model(model, lora_config)
@@ -331,7 +357,7 @@ def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim:
         if isinstance(module, LoraLayer)
     ]
     assert len(lora_layer_names) > 0, (
-        f"LoRA target_modules={CONFIG['target_modules']} matched zero modules in the model. "
+        f"LoRA target_modules={target_modules} matched zero modules in the model. "
         "get_peft_model() silently no-ops when target_modules doesn't match any submodule "
         "name — check that these strings match the actual attribute names in your attention "
         "implementation (e.g. MultiHeadAttention.W_Q / W_K / W_V)."
@@ -348,7 +374,7 @@ def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim:
     # requires_grad=True while freezing everything else. If a name in
     # CONFIG["modules_to_save"] doesn't match any submodule, PEFT silently
     # skips it — the module stays frozen along with the rest of the base model.
-    for save_name in CONFIG["modules_to_save"]:
+    for save_name in modules_to_save:
         pattern = rf"(^|\.){re.escape(save_name)}\.modules_to_save\."
         matched_params = [
             (n, p) for n, p in peft_model.named_parameters()
@@ -369,7 +395,7 @@ def build_finetune_model(vocab_size: int, use_cnn_features: bool, cnn_embed_dim:
         n_trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
         n_total = sum(p.numel() for p in peft_model.parameters())
         log.info(
-            f"modules_to_save {CONFIG['modules_to_save']} verified trainable. "
+            f"modules_to_save {modules_to_save} verified trainable. "
             f"Trainable params: {n_trainable:,} / {n_total:,} "
             f"({100 * n_trainable / n_total:.2f}%)"
         )
@@ -383,23 +409,25 @@ def unwrap_model(model: nn.Module) -> nn.Module:
 
 #----------- checkpoint / metrics persistence -----------#
 
-def save_lora_checkpoint(model: nn.Module, s3_fs: s3fs.S3FileSystem, use_frac: float, dataset_name: str, seed: int) -> None:
-    
+def save_lora_checkpoint(model: nn.Module, s3_fs: s3fs.S3FileSystem, use_frac: float, dataset_name: str, seed: int,
+                         run_tag: str = "") -> None:
+
     prefix_out = f"{prefix_finetuning}/{dataset_name}"
     peft_model = unwrap_model(model)
     state_dict = get_peft_model_state_dict(peft_model)
     buf = io.BytesIO()
     torch.save(state_dict, buf)
     buf.seek(0)
-    key = f"{prefix_out}/lora_bert_finetuned_{dataset_name}_{use_frac}_seed{seed}.pt"
+    key = f"{prefix_out}/lora_bert_finetuned_{dataset_name}_{use_frac}{_sfx(run_tag)}_seed{seed}.pt"
     with s3_fs.open(f"s3://{bucket_out}/{key}", "wb") as f:
         f.write(buf.read())
     log.info(f"LoRA checkpoint saved to s3://{bucket_out}/{key}")
 
 
-def load_lora_checkpoint(model: nn.Module, s3_fs: s3fs.S3FileSystem, use_frac: float, dataset_name: str, seed: int) -> None:
+def load_lora_checkpoint(model: nn.Module, s3_fs: s3fs.S3FileSystem, use_frac: float, dataset_name: str, seed: int,
+                         run_tag: str = "") -> None:
     prefix_out = f"{prefix_finetuning}/{dataset_name}"
-    key = f"{prefix_out}/lora_bert_finetuned_{dataset_name}_{use_frac}_seed{seed}.pt"
+    key = f"{prefix_out}/lora_bert_finetuned_{dataset_name}_{use_frac}{_sfx(run_tag)}_seed{seed}.pt"
     with s3_fs.open(f"s3://{bucket_out}/{key}", "rb") as f:
         buf = io.BytesIO(f.read())
     state_dict = torch.load(buf, map_location="cpu")
@@ -429,6 +457,7 @@ def save_epoch_metrics_npz(
     val_record_accs, val_record_f1s, val_record_aurocs,
     s3_fs: s3fs.S3FileSystem,
     extra: dict | None = None,
+    run_tag: str = "",
 ) -> None:
     # extra: additional arrays to store (Dandelion: per-epoch val sens/spec/G-mean + best_epoch)
     buf = io.BytesIO()
@@ -448,7 +477,7 @@ def save_epoch_metrics_npz(
     buf.seek(0)
     
     prefix_out = f"{prefix_finetuning}/{dataset_name}"
-    key = f"{prefix_out}/finetune_train_val_metrics_{dataset_name}_{use_frac}_seed{seed}.npz"
+    key = f"{prefix_out}/finetune_train_val_metrics_{dataset_name}_{use_frac}{_sfx(run_tag)}_seed{seed}.npz"
     with s3_fs.open(f"s3://{bucket_out}/{key}", "wb") as f:
         f.write(buf.read())
     log.info(f"Train/val metrics saved to s3://{bucket_out}/{key}")
@@ -469,10 +498,10 @@ def save_test_metrics_npz(
     test_record_acc, test_record_f1, test_record_auroc, s3_fs: s3fs.S3FileSystem,
     test_sensitivity=0.0, test_specificity=0.0, test_precision=0.0,
     test_record_sensitivity=0.0, test_record_specificity=0.0, test_record_precision=0.0,
-    test_gmean=0.0, test_record_gmean=0.0, best_epoch=0,
+    test_gmean=0.0, test_record_gmean=0.0, best_epoch=0, run_tag: str = "",
 ) -> None:
     prefix_out = f"{prefix_finetuning}/{dataset_name}"
-    key = f"{prefix_out}/finetune_test_metrics_{dataset_name}_{use_frac}.npz"
+    key = f"{prefix_out}/finetune_test_metrics_{dataset_name}_{use_frac}{_sfx(run_tag)}.npz"
 
     existing = _load_existing_npz(s3_fs, key)
     seeds = existing.get("seeds", np.array([], dtype=np.int64)).tolist()
@@ -543,6 +572,9 @@ def train_loop_per_worker(loop_config: dict) -> None:
     lora_alpha = loop_config["lora_alpha"]
     lora_dropout = loop_config["lora_dropout"]
     dropout = loop_config["dropout"]
+    class_weight = [1.0, float(loop_config.get("class_weight", DANDELION_CLASS_WEIGHT[1]))]
+    target_modules = loop_config.get("target_modules", CONFIG["target_modules"])
+    run_tag = loop_config.get("run_tag", "")
 
     prefix_bert_model = f"{prefix_root_bert_model}/bert_model_nleads_{in_channels}.pt"
 
@@ -593,7 +625,9 @@ def train_loop_per_worker(loop_config: dict) -> None:
         )
 
     model = build_finetune_model(vocab_size, use_cnn_features, cnn_embed_dim, num_classes, lora_r, lora_alpha, lora_dropout, dropout, prefix_bert_model,
-                                 dataset_name=dataset_name)
+                                 dataset_name=dataset_name, class_weight=class_weight, target_modules=target_modules)
+    if is_main_process() and run_tag:
+        log.info(f"[{dataset_name}] run_tag={run_tag} (suffix on all output files)")
     model = ray_torch.prepare_model(model)
 
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
@@ -793,7 +827,7 @@ def train_loop_per_worker(loop_config: dict) -> None:
 
             if improved:
                 epochs_no_improve = 0
-                save_lora_checkpoint(model, _s3, use_frac, dataset_name, loop_config["seed"])
+                save_lora_checkpoint(model, _s3, use_frac, dataset_name, loop_config["seed"], run_tag=run_tag)
             else:
                 epochs_no_improve += 1
                 if epochs_no_improve >= patience:
@@ -818,11 +852,12 @@ def train_loop_per_worker(loop_config: dict) -> None:
             _s3,
             extra={"best_epoch": best_epoch, "val_record_sensitivity": val_record_sens,
                    "val_record_specificity": val_record_spec, "val_record_gmean": val_record_gmean},
+            run_tag=run_tag,
         )
         log.info(f"Best epoch = {best_epoch} (selected by val {'record G-mean' if dataset_name == 'dandelion' else 'smoothed AUROC'})")
 
     dist.barrier()  # make sure rank 0's last save has landed on S3 before everyone reads it
-    load_lora_checkpoint(model, _s3, use_frac, dataset_name, loop_config["seed"])
+    load_lora_checkpoint(model, _s3, use_frac, dataset_name, loop_config["seed"], run_tag=run_tag)
     test_metrics = evaluate_metrics(dataset_name, model, test_loader, use_cnn_features, num_classes, device)
     test_loss = test_metrics["loss"]
     test_acc = test_metrics["acc"]
@@ -856,7 +891,8 @@ def train_loop_per_worker(loop_config: dict) -> None:
                               test_record_acc, test_record_f1, test_record_auroc, _s3,
                               test_sens, test_spec, test_prec,
                               test_record_sens, test_record_spec, test_record_prec,
-                              test_gmean=test_metrics["gmean"], test_record_gmean=test_metrics["record_gmean"], best_epoch=best_epoch)
+                              test_gmean=test_metrics["gmean"], test_record_gmean=test_metrics["record_gmean"], best_epoch=best_epoch,
+                              run_tag=run_tag)
 
 
 def run_finetuning(seeds: list[int] = None):
@@ -888,7 +924,11 @@ def run_finetuning(seeds: list[int] = None):
                 "min_delta": run_config_copy["min_delta"],
                 "warmup_epochs": run_config_copy["warmup_epochs"],
                 "grad_clip_norm": run_config_copy["grad_clip_norm"],
-                "seed": run_config_copy["seed"],   
+                "seed": run_config_copy["seed"],
+                # sweep knobs (must travel via loop_config: Ray workers don't see CLI edits to CONFIG)
+                "class_weight": run_config_copy["class_weight"],
+                "target_modules": list(run_config_copy["target_modules"]),
+                "run_tag": run_config_copy["run_tag"],
             },
             scaling_config=ScalingConfig(num_workers=CONFIG["num_ray_workers"], use_gpu=CONFIG["use_gpu"]),
             run_config=RunConfig(name=f"vqvae-bert-finetune-{run_config_copy['dataset']}-{run_config_copy['use_frac']}-seed{seed}".replace('.', 'p')),
@@ -913,7 +953,7 @@ def run_finetuning(seeds: list[int] = None):
 
         summary_key = (
             f"{prefix_finetuning}/{CONFIG['dataset']}/"
-            f"finetune_test_summary_{CONFIG['dataset']}_{CONFIG['use_frac']}.npz"
+            f"finetune_test_summary_{CONFIG['dataset']}_{CONFIG['use_frac']}{_sfx(CONFIG['run_tag'])}.npz"
         )
         buf = io.BytesIO()
         np.savez(
@@ -950,11 +990,27 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", type=str, default=None,
                         help="Comma-separated list of seeds, e.g. '42,0,1'")
     parser.add_argument("--num_ray_workers", type=int, help="number of Ray/DDP workers (1 per GPU)")
+    # Dandelion sweep knobs
+    parser.add_argument("--class_weight", type=float, help="loss weight for the low-EF class (normal EF = 1.0)")
+    parser.add_argument("--dropout", type=float, help="classifier-head dropout")
+    parser.add_argument("--patience", type=int, help="early-stopping patience (epochs)")
+    parser.add_argument("--target_modules", type=str,
+                        help="comma-separated LoRA targets, e.g. 'W_Q,W_K,W_V' (attention only) or 'W_Q,W_V,W_K,fc,fc1,fc2'")
+    parser.add_argument("--run_tag", type=str, default=None,
+                        help="suffix for output files; default for dandelion = auto from hyperparameters, '' = none")
     cli_args, _ = parser.parse_known_args()
     for key in ["dataset", "use_frac", "in_channels", "lr", "batch_size", "lora_r",
-                "lora_alpha", "lora_dropout", "weight_decay", "num_ray_workers"]:
+                "lora_alpha", "lora_dropout", "weight_decay", "num_ray_workers",
+                "class_weight", "dropout", "patience"]:
         if getattr(cli_args, key) is not None:
             CONFIG[key] = getattr(cli_args, key)
+    if cli_args.target_modules:
+        CONFIG["target_modules"] = [m.strip() for m in cli_args.target_modules.split(",") if m.strip()]
+    if cli_args.run_tag is not None:
+        CONFIG["run_tag"] = cli_args.run_tag
+    elif CONFIG["dataset"] == "dandelion":
+        CONFIG["run_tag"] = make_run_tag(CONFIG)
+    log.info(f"CONFIG: {CONFIG}")
 
     seeds = [int(s) for s in cli_args.seeds.split(",")] if cli_args.seeds else None
     # None if not provided; run_finetuning() defaults to [CONFIG["seed"]]
