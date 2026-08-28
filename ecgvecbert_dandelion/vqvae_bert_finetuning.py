@@ -85,6 +85,10 @@ NUM_CLASSES = {"ptbxl_superclasses": 5,
 
 # Dandelion cross-entropy class weights [normal EF, low EF]. 1.9 chosen by user (3.5 = inverse freq was too strong).
 DANDELION_CLASS_WEIGHT = [1.0, 1.9]
+# Dandelion checkpoint selection: record-level val G-mean = sqrt(sens * spec) at the 0.5 line, every epoch from
+# epoch 1 (no smoothing window). A new epoch replaces the saved checkpoint only if it beats the best G-mean by
+# more than this margin (guards against a lucky epoch); within the margin, the higher record AUROC wins.
+DANDELION_MIN_DELTA = 0.005
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -183,8 +187,9 @@ def evaluate_metrics(dataset_name: str, model, loader, use_cnn_features: bool, n
         sensitivity = recall_score(all_labels[:, 1], all_preds[:, 1], zero_division=0)  # recall for class 1 (low EF)
         specificity = recall_score(all_labels[:, 0], all_preds[:, 0], zero_division=0)  # recall for class 0 (normal EF)
         precision = precision_score(all_labels[:, 1], all_preds[:, 1], zero_division=0)  # precision for class 1 (low EF)
+        gmean = float(np.sqrt(sensitivity * specificity))  # geometric mean, balances sens and spec
     else:
-        sensitivity = specificity = precision = 0.0
+        sensitivity = specificity = precision = gmean = 0.0
 
     # ---- record (ecg_idx)-level aggregation ----
     unique_ecgs = np.unique(all_ecg_idxs)
@@ -215,14 +220,17 @@ def evaluate_metrics(dataset_name: str, model, loader, use_cnn_features: bool, n
         record_sensitivity = recall_score(record_true[:, 1], record_pred[:, 1], zero_division=0)
         record_specificity = recall_score(record_true[:, 0], record_pred[:, 0], zero_division=0)
         record_precision = precision_score(record_true[:, 1], record_pred[:, 1], zero_division=0)
+        record_gmean = float(np.sqrt(record_sensitivity * record_specificity))
     else:
-        record_sensitivity = record_specificity = record_precision = 0.0
+        record_sensitivity = record_specificity = record_precision = record_gmean = 0.0
 
     return {
         "loss": avg_loss,
         "acc": acc, "f1": macro_f1, "auroc": macro_auroc, "sensitivity": sensitivity, "specificity": specificity, "precision": precision,
+        "gmean": gmean,
         "record_acc": record_acc, "record_f1": record_f1, "record_auroc": record_auroc,
         "record_sensitivity": record_sensitivity, "record_specificity": record_specificity, "record_precision": record_precision,
+        "record_gmean": record_gmean,
     }
 
 
@@ -420,10 +428,13 @@ def save_epoch_metrics_npz(
     val_losses, val_accs, val_f1s, val_aurocs,
     val_record_accs, val_record_f1s, val_record_aurocs,
     s3_fs: s3fs.S3FileSystem,
+    extra: dict | None = None,
 ) -> None:
+    # extra: additional arrays to store (Dandelion: per-epoch val sens/spec/G-mean + best_epoch)
     buf = io.BytesIO()
     np.savez(
         buf,
+        **{k: np.array(v) for k, v in (extra or {}).items()},
         epoch=np.arange(1, len(train_losses) + 1),
         train_loss=np.array(train_losses), train_accuracy=np.array(train_accs),
         train_f1=np.array(train_f1s), train_auroc=np.array(train_aurocs),
@@ -458,6 +469,7 @@ def save_test_metrics_npz(
     test_record_acc, test_record_f1, test_record_auroc, s3_fs: s3fs.S3FileSystem,
     test_sensitivity=0.0, test_specificity=0.0, test_precision=0.0,
     test_record_sensitivity=0.0, test_record_specificity=0.0, test_record_precision=0.0,
+    test_gmean=0.0, test_record_gmean=0.0, best_epoch=0,
 ) -> None:
     prefix_out = f"{prefix_finetuning}/{dataset_name}"
     key = f"{prefix_out}/finetune_test_metrics_{dataset_name}_{use_frac}.npz"
@@ -472,6 +484,7 @@ def save_test_metrics_npz(
         "test_sensitivity": test_sensitivity, "test_specificity": test_specificity, "test_precision": test_precision,
         "test_record_sensitivity": test_record_sensitivity, "test_record_specificity": test_record_specificity,
         "test_record_precision": test_record_precision,
+        "test_gmean": test_gmean, "test_record_gmean": test_record_gmean, "best_epoch": best_epoch,
     }
     values = {name: existing.get(name, np.array([])).tolist() for name in fields}
     # Fields added later (e.g. sensitivity) are absent from older files: pad with NaN so
@@ -630,6 +643,11 @@ def train_loop_per_worker(loop_config: dict) -> None:
     val_auroc_history: list[float] = []
     val_acc_history: list[float] = []
     SMOOTH_WINDOW = 5
+    # Dandelion: checkpoint by record-level val G-mean (see DANDELION_MIN_DELTA), tracked per epoch
+    best_val_gmean = -float("inf")
+    best_val_gmean_auroc = -float("inf")   # record AUROC of the best-G-mean epoch (tiebreaker)
+    best_epoch = 0
+    val_record_sens, val_record_spec, val_record_gmean = [], [], []
     _s3 = s3fs.S3FileSystem()
 
     for epoch in range(num_epochs):
@@ -706,7 +724,9 @@ def train_loop_per_worker(loop_config: dict) -> None:
                          f"f1={val_metrics['f1']:.4f} AUROC={val_metrics['auroc']:.4f} "
                          f"Sens={val_metrics['sensitivity']:.4f} Spec={val_metrics['specificity']:.4f} Prec={val_metrics['precision']:.4f} "
                          f"| record_acc={val_metrics['record_acc']:.4f} record_f1={val_metrics['record_f1']:.4f} "
-                         f"record_AUROC={val_metrics['record_auroc']:.4f}")
+                         f"record_AUROC={val_metrics['record_auroc']:.4f} "
+                         f"record_Sens={val_metrics['record_sensitivity']:.4f} record_Spec={val_metrics['record_specificity']:.4f} "
+                         f"record_Gmean={val_metrics['record_gmean']:.4f}")
             else:
                 log.info(f"  Train: loss={train_metrics['loss']:.4f} acc={train_metrics['acc']:.4f} "
                          f"f1={train_metrics['f1']:.4f} AUROC={train_metrics['auroc']:.4f} "
@@ -733,25 +753,45 @@ def train_loop_per_worker(loop_config: dict) -> None:
         val_acc_history.append(val_metrics["acc"])
         smoothed_val_auroc = float(np.mean(val_auroc_history[-SMOOTH_WINDOW:]))
         smoothed_val_acc = float(np.mean(val_acc_history[-SMOOTH_WINDOW:]))
-        
+        val_record_sens.append(val_metrics["record_sensitivity"])
+        val_record_spec.append(val_metrics["record_specificity"])
+        val_record_gmean.append(val_metrics["record_gmean"])
+
         stop_flag = torch.zeros(1, dtype=torch.int32, device=device)
         if is_main_process():
-            # Wait until at least SMOOTH_WINDOW runs
-            window_full = len(val_auroc_history) >= SMOOTH_WINDOW
-
-            # If AUROC is NaN (due to class imbalance), use accuracy; otherwise use AUROC
-            if np.isnan(smoothed_val_auroc):
-                improved = window_full and (smoothed_val_acc - best_val_acc) > min_delta
-                metric_name = "accuracy"
+            if dataset_name == "dandelion":
+                # Judge = record-level val G-mean at the 0.5 line, every epoch from epoch 1, no smoothing.
+                # Must beat the best by > DANDELION_MIN_DELTA; within the margin, higher record AUROC wins.
+                gmean_now, auroc_now = val_metrics["record_gmean"], val_metrics["record_auroc"]
+                gain = gmean_now - best_val_gmean
+                improved = (gain > DANDELION_MIN_DELTA) or (abs(gain) <= DANDELION_MIN_DELTA and auroc_now > best_val_gmean_auroc)
+                metric_name = "record G-mean"
+                if improved:
+                    best_val_gmean, best_val_gmean_auroc, best_epoch = gmean_now, auroc_now, epoch + 1
+                    log.info(f"  New best epoch {best_epoch}: val record G-mean={gmean_now:.4f} "
+                             f"(Sens={val_metrics['record_sensitivity']:.4f} Spec={val_metrics['record_specificity']:.4f} "
+                             f"AUROC={auroc_now:.4f})")
             else:
-                improved = window_full and (smoothed_val_auroc - best_val_auroc) > min_delta
-                metric_name = "AUROC"
+                # Aruna's rule for the multilabel datasets: 5-epoch smoothed val AUROC (accuracy if AUROC is NaN)
+                # Wait until at least SMOOTH_WINDOW runs
+                window_full = len(val_auroc_history) >= SMOOTH_WINDOW
+
+                # If AUROC is NaN (due to class imbalance), use accuracy; otherwise use AUROC
+                if np.isnan(smoothed_val_auroc):
+                    improved = window_full and (smoothed_val_acc - best_val_acc) > min_delta
+                    metric_name = "accuracy"
+                else:
+                    improved = window_full and (smoothed_val_auroc - best_val_auroc) > min_delta
+                    metric_name = "AUROC"
+
+                if improved:
+                    if not np.isnan(smoothed_val_auroc):
+                        best_val_auroc = smoothed_val_auroc
+                    else:
+                        best_val_acc = smoothed_val_acc
+                    best_epoch = epoch + 1
 
             if improved:
-                if not np.isnan(smoothed_val_auroc):
-                    best_val_auroc = smoothed_val_auroc
-                else:
-                    best_val_acc = smoothed_val_acc
                 epochs_no_improve = 0
                 save_lora_checkpoint(model, _s3, use_frac, dataset_name, loop_config["seed"])
             else:
@@ -776,7 +816,10 @@ def train_loop_per_worker(loop_config: dict) -> None:
             val_losses, val_accs, val_f1s, val_aurocs,
             val_record_acc, val_record_f1, val_record_auroc,
             _s3,
+            extra={"best_epoch": best_epoch, "val_record_sensitivity": val_record_sens,
+                   "val_record_specificity": val_record_spec, "val_record_gmean": val_record_gmean},
         )
+        log.info(f"Best epoch = {best_epoch} (selected by val {'record G-mean' if dataset_name == 'dandelion' else 'smoothed AUROC'})")
 
     dist.barrier()  # make sure rank 0's last save has landed on S3 before everyone reads it
     load_lora_checkpoint(model, _s3, use_frac, dataset_name, loop_config["seed"])
@@ -799,6 +842,7 @@ def train_loop_per_worker(loop_config: dict) -> None:
             "test_sensitivity": test_sens, "test_specificity": test_spec, "test_precision": test_prec,
             "test_record_sensitivity": test_record_sens, "test_record_specificity": test_record_spec,
             "test_record_precision": test_record_prec,
+            "test_gmean": test_metrics["gmean"], "test_record_gmean": test_metrics["record_gmean"], "best_epoch": best_epoch,
         })
 
     if is_main_process():
@@ -806,11 +850,13 @@ def train_loop_per_worker(loop_config: dict) -> None:
                  f"f1={test_f1:.4f} AUROC={test_auroc:.4f} "
                  f"Sens={test_sens:.4f} Spec={test_spec:.4f} Prec={test_prec:.4f} "
                  f"| record_acc={test_record_acc:.4f} record_f1={test_record_f1:.4f} record_AUROC={test_record_auroc:.4f} "
-                 f"record_Sens={test_record_sens:.4f} record_Spec={test_record_spec:.4f} record_Prec={test_record_prec:.4f}")
+                 f"record_Sens={test_record_sens:.4f} record_Spec={test_record_spec:.4f} record_Prec={test_record_prec:.4f} "
+                 f"record_Gmean={test_metrics['record_gmean']:.4f} (best epoch {best_epoch})")
         save_test_metrics_npz(dataset_name, use_frac, loop_config["seed"], test_loss, test_acc, test_f1, test_auroc,
                               test_record_acc, test_record_f1, test_record_auroc, _s3,
                               test_sens, test_spec, test_prec,
-                              test_record_sens, test_record_spec, test_record_prec)
+                              test_record_sens, test_record_spec, test_record_prec,
+                              test_gmean=test_metrics["gmean"], test_record_gmean=test_metrics["record_gmean"], best_epoch=best_epoch)
 
 
 def run_finetuning(seeds: list[int] = None):
