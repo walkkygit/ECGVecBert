@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 # SageMaker / AWS settings
 BUCKET_OUT = "walkky-ml"
-S3_OUTPUT_PREFIX = "ecgvectbert/vqvae/bert_finetuning/sagemaker-outputs"
+S3_OUTPUT_PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/job_logs"
 
 # Training container
 PYTORCH_VERSION = "2.2.0"

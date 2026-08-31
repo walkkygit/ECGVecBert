@@ -1,11 +1,11 @@
 """
 Collect every Dandelion finetuning run from S3 into one table (one row per run tag x seed).
 
-Reads s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/dandelion/
+Reads s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/results/
     finetune_test_metrics_dandelion_1.0[_<run_tag>].npz            (test metrics, one row per seed)
     finetune_train_val_metrics_dandelion_1.0[_<run_tag>]_seed<S>.npz (per-epoch val curves + best_epoch)
 
-Writes results_dandelion.csv locally and to the same S3 folder, and prints the table sorted by
+Writes results_dandelion_split2.csv locally and to the same S3 folder, and prints the table sorted by
 val record G-mean (the sweep judge). Test columns are for reporting only; never pick a config on them.
 
 Usage:  python collect_results.py            (works locally or on SageMaker; needs S3 read access)
@@ -20,8 +20,8 @@ import pandas as pd
 import s3fs
 
 BUCKET = "walkky-ml"
-PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion"
-OUT_NAME = "results_dandelion.csv"
+PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/results"
+OUT_NAME = "results_dandelion_split2.csv"
 
 TAG_RE = re.compile(r"cw(?P<cw>[\d.]+)_lr(?P<lr>[\d.e+-]+)_r(?P<r>\d+)_do(?P<do>[\d.]+)_ld(?P<ld>[\d.]+)"
                     r"_wd(?P<wd>[\d.e+-]+)_tm(?P<tm>\w+)")

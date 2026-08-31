@@ -129,9 +129,9 @@ def read_dandelion_npz(use_frac=1.0, data_path=None):
     if data_path is None:
         is_sagemaker = os.path.exists("/opt/ml/")
         if is_sagemaker:
-            data_path = "s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/datasets"
+            data_path = "s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/datasets"
         else:
-            data_path = "/Users/burcuozek/Desktop/dandelion data"
+            data_path = "/Users/burcuozek/Desktop/ECGVecBert/npz_split2"
 
     signals = []
     labels = []
@@ -139,11 +139,8 @@ def read_dandelion_npz(use_frac=1.0, data_path=None):
     strat_fold_list = []
 
     try:
-        # Determine which combined NPZ file to load based on use_frac
-        if use_frac <= 0.1:
-            npz_filename = "dandelion_10p_combined_signals.npz"
-        else:
-            npz_filename = "dandelion_100p_combined_signals.npz"
+        # split-2 protocol: one NPZ with the fixed patient split (train/val/internal test)
+        npz_filename = "dandelion_split2_combined_signals.npz"
 
         npz_path = os.path.join(data_path, npz_filename)
         log.info(f"Loading combined NPZ from {npz_path}")
@@ -717,10 +714,15 @@ def _sentences_s3_key(
     dataset_name: str, split_name: str, use_frac: float, shard_idx: int = 0, num_shards: int = NUM_GENERATION_SHARDS
 ) -> str:
     use_frac_str = f"{use_frac:.2f}" if split_name=="train" else "full"
+    # split-2 protocol: Dandelion sentences live under dandelion/split_2_related/sentences/
+    if dataset_name == "dandelion":
+        sentences_prefix = f"{prefix_out}/dandelion/split_2_related/sentences"
+    else:
+        sentences_prefix = f"{prefix_out}/sentences"
     if num_shards == 1:
-        return f"{prefix_out}/sentences/{dataset_name}_{split_name}_{use_frac_str}.npz"
+        return f"{sentences_prefix}/{dataset_name}_{split_name}_{use_frac_str}.npz"
     return (
-        f"{prefix_out}/sentences/"
+        f"{sentences_prefix}/"
         f"{dataset_name}_{split_name}_{use_frac_str}_shard_{shard_idx:04d}_of_{num_shards:04d}.npz"
     )
 

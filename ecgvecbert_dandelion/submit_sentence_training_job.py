@@ -20,7 +20,7 @@ print(f"Role: {role}")
 
 # Job configuration
 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-job_name = f"dandelion-sentences-100p-{timestamp}"
+job_name = f"dandelion-sentences-split2-{timestamp}"
 instance_type = "ml.g4dn.8xlarge"
 instance_count = 1
 
@@ -33,7 +33,7 @@ estimator = PyTorch(
     framework_version="2.0",
     py_version="py310",
     source_dir=".",
-    output_path=f"s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/training-jobs/",
+    output_path=f"s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/job_logs/",
     hyperparameters={
         "in_channels": 12,
         "batch_size": 32,

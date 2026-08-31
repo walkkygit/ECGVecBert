@@ -88,6 +88,15 @@ prefix_finetuning = "ecgvectbert/vqvae/bert_finetuning"
 prefix_root_bert_model = "aruna-files/vqvae_final_12lead_vqenc/vqvae/bert_pretraining"
 prefix_sentences = f"{prefix_finetuning}/sentences"
 
+# split-2 protocol (2026-08-31): all Dandelion artifacts live under dandelion/split_2_related/
+prefix_dandelion_split2 = f"{prefix_finetuning}/dandelion/split_2_related"
+
+
+def _results_prefix(dataset_name: str) -> str:
+    if dataset_name == "dandelion":
+        return f"{prefix_dandelion_split2}/results"
+    return f"{prefix_finetuning}/{dataset_name}"
+
 NUM_CLASSES = {"ptbxl_superclasses": 5,
                "ptbxl_subclasses": 23,
                "ptbxl_form": 19,
@@ -412,7 +421,7 @@ def unwrap_model(model: nn.Module) -> nn.Module:
 def save_lora_checkpoint(model: nn.Module, s3_fs: s3fs.S3FileSystem, use_frac: float, dataset_name: str, seed: int,
                          run_tag: str = "") -> None:
 
-    prefix_out = f"{prefix_finetuning}/{dataset_name}"
+    prefix_out = _results_prefix(dataset_name)
     peft_model = unwrap_model(model)
     state_dict = get_peft_model_state_dict(peft_model)
     buf = io.BytesIO()
@@ -426,7 +435,7 @@ def save_lora_checkpoint(model: nn.Module, s3_fs: s3fs.S3FileSystem, use_frac: f
 
 def load_lora_checkpoint(model: nn.Module, s3_fs: s3fs.S3FileSystem, use_frac: float, dataset_name: str, seed: int,
                          run_tag: str = "") -> None:
-    prefix_out = f"{prefix_finetuning}/{dataset_name}"
+    prefix_out = _results_prefix(dataset_name)
     key = f"{prefix_out}/lora_bert_finetuned_{dataset_name}_{use_frac}{_sfx(run_tag)}_seed{seed}.pt"
     with s3_fs.open(f"s3://{bucket_out}/{key}", "rb") as f:
         buf = io.BytesIO(f.read())
@@ -476,7 +485,7 @@ def save_epoch_metrics_npz(
     )
     buf.seek(0)
     
-    prefix_out = f"{prefix_finetuning}/{dataset_name}"
+    prefix_out = _results_prefix(dataset_name)
     key = f"{prefix_out}/finetune_train_val_metrics_{dataset_name}_{use_frac}{_sfx(run_tag)}_seed{seed}.npz"
     with s3_fs.open(f"s3://{bucket_out}/{key}", "wb") as f:
         f.write(buf.read())
@@ -500,7 +509,7 @@ def save_test_metrics_npz(
     test_record_sensitivity=0.0, test_record_specificity=0.0, test_record_precision=0.0,
     test_gmean=0.0, test_record_gmean=0.0, best_epoch=0, run_tag: str = "",
 ) -> None:
-    prefix_out = f"{prefix_finetuning}/{dataset_name}"
+    prefix_out = _results_prefix(dataset_name)
     key = f"{prefix_out}/finetune_test_metrics_{dataset_name}_{use_frac}{_sfx(run_tag)}.npz"
 
     existing = _load_existing_npz(s3_fs, key)
@@ -952,7 +961,7 @@ def run_finetuning(seeds: list[int] = None):
         )
 
         summary_key = (
-            f"{prefix_finetuning}/{CONFIG['dataset']}/"
+            f"{_results_prefix(CONFIG['dataset'])}/"
             f"finetune_test_summary_{CONFIG['dataset']}_{CONFIG['use_frac']}{_sfx(CONFIG['run_tag'])}.npz"
         )
         buf = io.BytesIO()
