@@ -172,6 +172,8 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--target_modules", type=str, default=None, help="e.g. 'W_Q,W_K,W_V' for attention-only LoRA")
     parser.add_argument("--run_tag", type=str, default=None, help="output-file suffix ('' = none; default auto)")
+    parser.add_argument("--ckpt_metric", type=str, default=None, choices=["gmean", "val_loss"],
+                        help="dandelion checkpoint rule (default: finetuning CONFIG)")
     parser.add_argument("--instance_type", type=str, default=None,
                         help=f"override {INSTANCE_TYPE}; use ml.g5.8xlarge (quota 32) to run sweep jobs in parallel")
 
@@ -184,7 +186,7 @@ if __name__ == "__main__":
     num_ray_workers = args.num_ray_workers or GPU_PER_NODE
     seeds = args.seeds or SEEDS
     extra_hp = {k: getattr(args, k) for k in ["class_weight", "lr", "lora_r", "lora_dropout", "dropout",
-                                              "weight_decay", "patience", "target_modules", "run_tag"]}
+                                              "weight_decay", "patience", "target_modules", "run_tag", "ckpt_metric"]}
 
     if args.all:
         for usefrac, dataset in itertools.product(USE_FRAC, DATASETS):

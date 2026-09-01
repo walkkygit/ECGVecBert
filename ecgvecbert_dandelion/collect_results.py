@@ -24,7 +24,7 @@ PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/results"
 OUT_NAME = "results_dandelion_split2.csv"
 
 TAG_RE = re.compile(r"cw(?P<cw>[\d.]+)_lr(?P<lr>[\d.e+-]+)_r(?P<r>\d+)_do(?P<do>[\d.]+)_ld(?P<ld>[\d.]+)"
-                    r"_wd(?P<wd>[\d.e+-]+)_tm(?P<tm>\w+)")
+                    r"_wd(?P<wd>[\d.e+-]+)_tm(?P<tm>[A-Za-z]+)(?:_ck(?P<ck>[A-Za-z]+))?")
 
 
 def load_npz(fs, key):
@@ -47,7 +47,8 @@ def main():
             row = {"run_tag": tag or "(untagged)", "seed": int(seed)}
             row.update({"class_weight": cfg.get("cw"), "lr": cfg.get("lr"), "lora_r": cfg.get("r"),
                         "dropout": cfg.get("do"), "lora_dropout": cfg.get("ld"), "weight_decay": cfg.get("wd"),
-                        "target_modules": cfg.get("tm")})
+                        "target_modules": cfg.get("tm"),
+                        "ckpt_metric": "val_loss" if cfg.get("ck") == "vloss" else ("gmean" if cfg else None)})
             # per-epoch val curve for this seed -> value at the best epoch
             vk = f"{PREFIX}/finetune_train_val_metrics_dandelion_1.0{'_' + tag if tag else ''}_seed{seed}.npz"
             if fs.exists(f"s3://{BUCKET}/{vk}"):

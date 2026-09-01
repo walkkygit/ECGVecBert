@@ -67,14 +67,19 @@ CONFIG = {
     # sweep runs don't overwrite each other ("" = auto-generate from the hyperparameters for dandelion)
     "class_weight": 1.9,
     "run_tag": "",
+    # Dandelion checkpoint rule: "gmean" = best val record G-mean at the 0.5 line (AUROC tiebreaker);
+    # "val_loss" = lowest sentence-level val loss (threshold-free)
+    "ckpt_metric": "gmean",
 }
 
 
 def make_run_tag(cfg: dict) -> str:
-    """Filename suffix identifying one hyperparameter configuration, e.g. cw1.9_lr1e-04_r8_do0.1_ld0.1_wd1e-04_tmall."""
+    """Filename suffix identifying one hyperparameter configuration, e.g. cw1.9_lr1e-04_r8_do0.1_ld0.1_wd1e-04_tmall
+    (+ "_ckvloss" when the checkpoint is selected by val loss, so the two rules never overwrite each other)."""
     tm = "all" if "fc1" in cfg["target_modules"] else "attn"
+    ck = "_ckvloss" if cfg.get("ckpt_metric", "gmean") == "val_loss" else ""
     return (f"cw{cfg['class_weight']}_lr{cfg['lr']:.0e}_r{cfg['lora_r']}_do{cfg['dropout']}"
-            f"_ld{cfg['lora_dropout']}_wd{cfg['weight_decay']:.0e}_tm{tm}")
+            f"_ld{cfg['lora_dropout']}_wd{cfg['weight_decay']:.0e}_tm{tm}{ck}")
 
 
 def _sfx(run_tag: str) -> str:
@@ -584,6 +589,7 @@ def train_loop_per_worker(loop_config: dict) -> None:
     class_weight = [1.0, float(loop_config.get("class_weight", DANDELION_CLASS_WEIGHT[1]))]
     target_modules = loop_config.get("target_modules", CONFIG["target_modules"])
     run_tag = loop_config.get("run_tag", "")
+    ckpt_metric = loop_config.get("ckpt_metric", "gmean")
 
     prefix_bert_model = f"{prefix_root_bert_model}/bert_model_nleads_{in_channels}.pt"
 
@@ -689,6 +695,7 @@ def train_loop_per_worker(loop_config: dict) -> None:
     # Dandelion: checkpoint by record-level val G-mean (see DANDELION_MIN_DELTA), tracked per epoch
     best_val_gmean = -float("inf")
     best_val_gmean_auroc = -float("inf")   # record AUROC of the best-G-mean epoch (tiebreaker)
+    best_val_loss = float("inf")           # used when ckpt_metric == "val_loss"
     best_epoch = 0
     val_record_sens, val_record_spec, val_record_gmean = [], [], []
     _s3 = s3fs.S3FileSystem()
@@ -802,7 +809,17 @@ def train_loop_per_worker(loop_config: dict) -> None:
 
         stop_flag = torch.zeros(1, dtype=torch.int32, device=device)
         if is_main_process():
-            if dataset_name == "dandelion":
+            if dataset_name == "dandelion" and ckpt_metric == "val_loss":
+                # Judge = sentence-level val loss (threshold-free), every epoch from epoch 1; lower by > min_delta wins.
+                loss_now = val_metrics["loss"]
+                improved = (best_val_loss - loss_now) > min_delta
+                metric_name = "loss"
+                if improved:
+                    best_val_loss, best_epoch = loss_now, epoch + 1
+                    log.info(f"  New best epoch {best_epoch}: val loss={loss_now:.4f} "
+                             f"(record G-mean={val_metrics['record_gmean']:.4f} Sens={val_metrics['record_sensitivity']:.4f} "
+                             f"Spec={val_metrics['record_specificity']:.4f} AUROC={val_metrics['record_auroc']:.4f})")
+            elif dataset_name == "dandelion":
                 # Judge = record-level val G-mean at the 0.5 line, every epoch from epoch 1, no smoothing.
                 # Must beat the best by > DANDELION_MIN_DELTA; within the margin, higher record AUROC wins.
                 gmean_now, auroc_now = val_metrics["record_gmean"], val_metrics["record_auroc"]
@@ -938,6 +955,7 @@ def run_finetuning(seeds: list[int] = None):
                 "class_weight": run_config_copy["class_weight"],
                 "target_modules": list(run_config_copy["target_modules"]),
                 "run_tag": run_config_copy["run_tag"],
+                "ckpt_metric": run_config_copy["ckpt_metric"],
             },
             scaling_config=ScalingConfig(num_workers=CONFIG["num_ray_workers"], use_gpu=CONFIG["use_gpu"]),
             run_config=RunConfig(name=f"vqvae-bert-finetune-{run_config_copy['dataset']}-{run_config_copy['use_frac']}-seed{seed}".replace('.', 'p')),
@@ -1007,10 +1025,12 @@ if __name__ == "__main__":
                         help="comma-separated LoRA targets, e.g. 'W_Q,W_K,W_V' (attention only) or 'W_Q,W_V,W_K,fc,fc1,fc2'")
     parser.add_argument("--run_tag", type=str, default=None,
                         help="suffix for output files; default for dandelion = auto from hyperparameters, '' = none")
+    parser.add_argument("--ckpt_metric", type=str, choices=["gmean", "val_loss"],
+                        help="dandelion checkpoint rule: 'gmean' (val record G-mean at 0.5) or 'val_loss' (lowest val loss)")
     cli_args, _ = parser.parse_known_args()
     for key in ["dataset", "use_frac", "in_channels", "lr", "batch_size", "lora_r",
                 "lora_alpha", "lora_dropout", "weight_decay", "num_ray_workers",
-                "class_weight", "dropout", "patience"]:
+                "class_weight", "dropout", "patience", "ckpt_metric"]:
         if getattr(cli_args, key) is not None:
             CONFIG[key] = getattr(cli_args, key)
     if cli_args.target_modules:

@@ -44,8 +44,13 @@ def short_tag(cfg: dict) -> str:
     parts = []
     for k, v in cfg.items():
         key = {"class_weight": "cw", "lr": "lr", "lora_r": "r", "dropout": "do", "lora_dropout": "ld",
-               "weight_decay": "wd", "target_modules": "tm"}.get(k, k)
-        val = "attn" if k == "target_modules" else (f"{v:.0e}" if isinstance(v, float) and v < 1e-2 else str(v))
+               "weight_decay": "wd", "target_modules": "tm", "ckpt_metric": "ck"}.get(k, k)
+        if k == "target_modules":
+            val = "attn"
+        elif k == "ckpt_metric":
+            val = "vloss" if v == "val_loss" else str(v)
+        else:
+            val = f"{v:.0e}" if isinstance(v, float) and v < 1e-2 else str(v)
         parts.append(f"{key}{val}")
     return "-".join(parts).replace(".", "p")
 
@@ -62,6 +67,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_dropout", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
     parser.add_argument("--target_modules", type=str, default=None)
+    parser.add_argument("--ckpt_metric", type=str, default=None, choices=["gmean", "val_loss"])
     parser.add_argument("--seeds", type=str, default=SEEDS)
     parser.add_argument("--instance_type", type=str, default=INSTANCE_TYPE)
     parser.add_argument("--dry_run", action="store_true", help="print the jobs, submit nothing")
@@ -75,7 +81,7 @@ if __name__ == "__main__":
         parser.error("give --round N or --configs '[...]'")
 
     fixed = {k: getattr(args, k) for k in ["class_weight", "lr", "lora_r", "dropout", "lora_dropout",
-                                           "weight_decay", "target_modules"] if getattr(args, k) is not None}
+                                           "weight_decay", "target_modules", "ckpt_metric"] if getattr(args, k) is not None}
 
     log.info(f"{len(configs)} job(s), fixed={fixed}, seeds={args.seeds}, instance={args.instance_type}")
     for cfg in configs:
