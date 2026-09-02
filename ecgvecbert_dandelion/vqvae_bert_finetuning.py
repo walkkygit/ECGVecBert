@@ -78,8 +78,11 @@ def make_run_tag(cfg: dict) -> str:
     (+ "_ckvloss" when the checkpoint is selected by val loss, so the two rules never overwrite each other)."""
     tm = "all" if "fc1" in cfg["target_modules"] else "attn"
     ck = "_ckvloss" if cfg.get("ckpt_metric", "gmean") == "val_loss" else ""
+    # newer knobs only appear when non-default, so every earlier tag stays byte-identical
+    hf = f"_hf{cfg['lr_head_factor']}" if cfg.get("lr_head_factor", 0.1) != 0.1 else ""
+    la = f"_a{cfg['lora_alpha']}" if cfg.get("lora_alpha", 16) != 16 else ""
     return (f"cw{cfg['class_weight']}_lr{cfg['lr']:.0e}_r{cfg['lora_r']}_do{cfg['dropout']}"
-            f"_ld{cfg['lora_dropout']}_wd{cfg['weight_decay']:.0e}_tm{tm}{ck}")
+            f"_ld{cfg['lora_dropout']}_wd{cfg['weight_decay']:.0e}_tm{tm}{ck}{hf}{la}")
 
 
 def _sfx(run_tag: str) -> str:
@@ -1027,10 +1030,12 @@ if __name__ == "__main__":
                         help="suffix for output files; default for dandelion = auto from hyperparameters, '' = none")
     parser.add_argument("--ckpt_metric", type=str, choices=["gmean", "val_loss"],
                         help="dandelion checkpoint rule: 'gmean' (val record G-mean at 0.5) or 'val_loss' (lowest val loss)")
+    parser.add_argument("--lr_head_factor", type=float,
+                        help="classifier-head LR = lr * lr_head_factor (default 0.1)")
     cli_args, _ = parser.parse_known_args()
     for key in ["dataset", "use_frac", "in_channels", "lr", "batch_size", "lora_r",
                 "lora_alpha", "lora_dropout", "weight_decay", "num_ray_workers",
-                "class_weight", "dropout", "patience", "ckpt_metric"]:
+                "class_weight", "dropout", "patience", "ckpt_metric", "lr_head_factor"]:
         if getattr(cli_args, key) is not None:
             CONFIG[key] = getattr(cli_args, key)
     if cli_args.target_modules:

@@ -186,7 +186,8 @@ if __name__ == "__main__":
     num_ray_workers = args.num_ray_workers or GPU_PER_NODE
     seeds = args.seeds or SEEDS
     extra_hp = {k: getattr(args, k) for k in ["class_weight", "lr", "lora_r", "lora_dropout", "dropout",
-                                              "weight_decay", "patience", "target_modules", "run_tag", "ckpt_metric"]}
+                                              "weight_decay", "patience", "target_modules", "run_tag", "ckpt_metric",
+                                              "lr_head_factor", "lora_alpha"]}
 
     if args.all:
         for usefrac, dataset in itertools.product(USE_FRAC, DATASETS):

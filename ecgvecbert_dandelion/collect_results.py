@@ -24,7 +24,8 @@ PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/results"
 OUT_NAME = "results_dandelion_split2.csv"
 
 TAG_RE = re.compile(r"cw(?P<cw>[\d.]+)_lr(?P<lr>[\d.e+-]+)_r(?P<r>\d+)_do(?P<do>[\d.]+)_ld(?P<ld>[\d.]+)"
-                    r"_wd(?P<wd>[\d.e+-]+)_tm(?P<tm>[A-Za-z]+)(?:_ck(?P<ck>[A-Za-z]+))?")
+                    r"_wd(?P<wd>[\d.e+-]+)_tm(?P<tm>[A-Za-z]+)(?:_ck(?P<ck>[A-Za-z]+))?"
+                    r"(?:_hf(?P<hf>[\d.]+))?(?:_a(?P<a>\d+))?")
 
 
 def load_npz(fs, key):
@@ -48,6 +49,8 @@ def main():
             row.update({"class_weight": cfg.get("cw"), "lr": cfg.get("lr"), "lora_r": cfg.get("r"),
                         "dropout": cfg.get("do"), "lora_dropout": cfg.get("ld"), "weight_decay": cfg.get("wd"),
                         "target_modules": cfg.get("tm"),
+                        "lr_head_factor": cfg.get("hf") or ("0.1" if cfg else None),
+                        "lora_alpha": cfg.get("a") or ("16" if cfg else None),
                         "ckpt_metric": "val_loss" if cfg.get("ck") == "vloss" else ("gmean" if cfg else None)})
             # per-epoch val curve for this seed -> value at the best epoch
             vk = f"{PREFIX}/finetune_train_val_metrics_dandelion_1.0{'_' + tag if tag else ''}_seed{seed}.npz"
@@ -72,7 +75,7 @@ def main():
     if not rows:
         print("no result files found"); sys.exit(1)
     cols = ["run_tag", "seed", "class_weight", "lr", "lora_r", "dropout", "lora_dropout", "weight_decay",
-            "target_modules", "best_epoch", "epochs_run", "val_gmean", "val_sens", "val_spec", "val_auroc",
+            "target_modules", "ckpt_metric", "lr_head_factor", "lora_alpha", "best_epoch", "epochs_run", "val_gmean", "val_sens", "val_spec", "val_auroc",
             "test_gmean", "test_sens", "test_spec", "test_auroc", "test_acc", "test_f1"]
     df = pd.DataFrame(rows).reindex(columns=cols).sort_values(["val_gmean", "val_auroc"], ascending=False, na_position="last")
     df.to_csv(OUT_NAME, index=False)

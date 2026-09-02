@@ -48,10 +48,10 @@ def short(tag):
     """cw3.5_lr1e-04_r8_do0.1_ld0.1_wd1e-04_tmall -> cw3.5 (only the parts that differ from the default)"""
     if tag == "untagged":
         return "cw1.9 (untagged run)"
-    default = {"lr": "1e-04", "r": "8", "do": "0.1", "ld": "0.1", "wd": "1e-04", "tm": "all"}
+    default = {"lr": "1e-04", "r": "8", "do": "0.1", "ld": "0.1", "wd": "1e-04", "tm": "all", "hf": "0.1", "a": "16"}
     parts = []
     for p in tag.split("_"):
-        m = re.match(r"(cw|lr|r|do|ld|wd|tm)(.*)", p)
+        m = re.match(r"(cw|lr|r|do|ld|wd|tm|ck|hf|a)(.*)", p)
         if not m:
             continue
         k, v = m.groups()
