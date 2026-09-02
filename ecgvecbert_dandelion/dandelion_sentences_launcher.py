@@ -74,6 +74,7 @@ def make_estimator(sm_session, ROLE_ARN, in_channels: int, use_frac: float, hp) 
         sagemaker_session=sm_session,
         base_job_name=job_name,
         output_path=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/",
+        code_location=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/code",   # source tarballs here, not at the bucket root
         # torchrun handles DDP process launch across GPUs on each node
         distribution={
             "torch_distributed": {

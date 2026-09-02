@@ -43,6 +43,7 @@ def launch(run_tag: str, seeds: str, split: str, confirm: str, force: str, insta
         sagemaker_session=sm_session,
         base_job_name=short,
         output_path=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/",
+        code_location=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/code",   # source tarballs here, not at the bucket root
         hyperparameters=hp,
         volume_size=50,
         max_run=3 * 3600,

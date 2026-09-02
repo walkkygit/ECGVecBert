@@ -34,6 +34,7 @@ estimator = PyTorch(
     py_version="py310",
     source_dir=".",
     output_path=f"s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/job_logs/",
+    code_location="s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/job_logs/code",   # source tarballs here, not at the bucket root
     hyperparameters={
         "in_channels": 12,
         "batch_size": 32,

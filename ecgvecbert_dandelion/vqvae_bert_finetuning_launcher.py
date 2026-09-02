@@ -100,6 +100,7 @@ def make_estimator(sm_session, ROLE_ARN, hyperparameters, instance_type: str = N
         sagemaker_session=sm_session,
         base_job_name=job_name,
         output_path=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/",
+        code_location=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/code",   # source tarballs here, not at the bucket root
         # No `distribution=` here on purpose: Ray Train's TorchTrainer already
         # launches one worker process per GPU internally. Adding SageMaker's
         # torch_distributed launcher on top would double-spawn workers.
