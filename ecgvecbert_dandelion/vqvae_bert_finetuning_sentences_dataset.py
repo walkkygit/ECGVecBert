@@ -56,6 +56,72 @@ log = logging.getLogger(__name__)
 
 # Output files from fine-tuning data prep
 prefix_out = "ecgvectbert/vqvae/bert_finetuning"
+
+# ---------------------------------------------------------------------------------------------------------
+# Dandelion protocol switch (phase 3, 2026-09-03). Everything Dandelion (NPZ, sentences, results, job logs)
+# lives under dandelion/<DANDELION_SPLIT_DIR>/ on S3:
+#   split_2_related : phase 2, one model trained on the whole 7,369-patient train set (default, unchanged)
+#   split_3_folds   : phase 3, one model per training fold (fold 1/2/3 of split_patients/training_patients.pkl);
+#                     same patients, val and internal test, the 7K stays locked. Sentences are byte copies of
+#                     split_2_related (same VQ-VAE / vocab); the train split is filtered by fold at load time.
+# Set via set_dandelion_fold() from the CLI (driver) AND inside every Ray worker (loop_config), never by env var.
+DANDELION_SPLIT_DIR = "split_2_related"
+DANDELION_FOLD = None            # None = whole train set; 1 / 2 / 3 = that fold only
+DANDELION_FOLD_DUP = "unique"    # "unique": each fold patient once; "repeat": as many times as listed in the fold
+FOLD_IDS_FILE = "dandelion_split3_folds_fold_ids.npz"     # small sidecar: ids, labels, strat_fold, fold_count (N, 3)
+
+
+def set_dandelion_fold(fold, fold_dup: str = "unique") -> None:
+    """Select the Dandelion protocol: fold=None -> split_2_related (phase 2); fold in {1,2,3} -> split_3_folds."""
+    global DANDELION_SPLIT_DIR, DANDELION_FOLD, DANDELION_FOLD_DUP
+    if fold is None:
+        DANDELION_SPLIT_DIR, DANDELION_FOLD = "split_2_related", None
+        return
+    fold = int(fold)
+    if fold not in (1, 2, 3):
+        raise ValueError(f"fold must be 1, 2 or 3 (got {fold})")
+    if fold_dup not in ("unique", "repeat"):
+        raise ValueError(f"fold_dup must be 'unique' or 'repeat' (got {fold_dup!r})")
+    DANDELION_SPLIT_DIR, DANDELION_FOLD, DANDELION_FOLD_DUP = "split_3_folds", fold, fold_dup
+    log.info(f"[dandelion] protocol = {DANDELION_SPLIT_DIR}, training fold {fold} ({fold_dup})")
+
+
+def dandelion_prefix() -> str:
+    return f"{prefix_out}/dandelion/{DANDELION_SPLIT_DIR}"
+
+
+def load_fold_counts(fs=None) -> tuple[np.ndarray, np.ndarray]:
+    """(ids, fold_count) from the split_3_folds sidecar on S3: fold_count[i, f-1] = times patient i is listed in fold f."""
+    fs = fs or s3_fs
+    key = f"s3://{bucket_out}/{prefix_out}/dandelion/split_3_folds/datasets/{FOLD_IDS_FILE}"
+    with fs.open(key, "rb") as f:
+        d = np.load(io.BytesIO(f.read()), allow_pickle=True)
+        return d["ids"].astype(str), d["fold_count"].astype(np.int64)
+
+
+def filter_sentences_to_fold(merged: dict, fold: int, fold_dup: str) -> dict:
+    """Keep only the sentences of patients in training fold `fold` (rows selected by ecg_idxs).
+    fold_dup='repeat' stacks a patient's sentences count times (fold 3 lists some patients twice)."""
+    ids, fold_count = load_fold_counts()
+    count_of = dict(zip(ids, fold_count[:, fold - 1]))
+    ecg_idxs = merged["ecg_idxs"].astype(str)
+    unknown = set(np.unique(ecg_idxs)) - set(ids)
+    if unknown:
+        raise ValueError(f"{len(unknown)} sentence patients are not in the fold sidecar, e.g. {sorted(unknown)[:3]}")
+    per_row = np.array([count_of[i] for i in ecg_idxs], dtype=np.int64)
+    if fold_dup == "repeat":
+        sel = np.repeat(np.arange(len(ecg_idxs)), per_row)
+    else:
+        sel = np.flatnonzero(per_row > 0)
+    row_keys = ("sentence_tokens", "labels", "ecg_idxs", "num_beats", "beat_idx_start", "beat_idx_end", "cnn_embeddings")
+    out = {k: (v[sel] if k in row_keys else v) for k, v in merged.items()}
+    n_pat_all = len(np.unique(ecg_idxs))
+    n_pat = len(np.unique(ecg_idxs[per_row > 0]))
+    expected = int((fold_count[:, fold - 1] > 0).sum())
+    log.info(f"[dandelion] fold {fold} ({fold_dup}): {len(sel):,} of {len(ecg_idxs):,} train sentences, "
+             f"{n_pat:,} of {n_pat_all:,} patients in this shard set (fold has {expected:,} unique patients in the NPZ; "
+             f"the rest had no sentences, i.e. too few R-peaks at sentence building)")
+    return out
 SplitName = Literal["train", "val", "test"]
 Splits = dict[SplitName, tuple[list, list, list]]
 
@@ -129,9 +195,10 @@ def read_dandelion_npz(use_frac=1.0, data_path=None):
     if data_path is None:
         is_sagemaker = os.path.exists("/opt/ml/")
         if is_sagemaker:
-            data_path = "s3://walkky-ml/ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/datasets"
+            data_path = f"s3://{bucket_out}/{dandelion_prefix()}/datasets"
         else:
-            data_path = "/Users/burcuozek/Desktop/ECGVecBert/npz_split2"
+            data_path = {"split_2_related": "/Users/burcuozek/Desktop/ECGVecBert/npz_split2",
+                         "split_3_folds": "/Users/burcuozek/Desktop/ECGVecBert/npz_split3_folds"}[DANDELION_SPLIT_DIR]
 
     signals = []
     labels = []
@@ -139,8 +206,9 @@ def read_dandelion_npz(use_frac=1.0, data_path=None):
     strat_fold_list = []
 
     try:
-        # split-2 protocol: one NPZ with the fixed patient split (train/val/internal test)
-        npz_filename = "dandelion_split2_combined_signals.npz"
+        # one NPZ with the fixed patient split (train/val/internal test); split_3_folds adds fold_count (N, 3)
+        npz_filename = {"split_2_related": "dandelion_split2_combined_signals.npz",
+                        "split_3_folds": "dandelion_split3_folds_combined_signals.npz"}[DANDELION_SPLIT_DIR]
 
         npz_path = os.path.join(data_path, npz_filename)
         log.info(f"Loading combined NPZ from {npz_path}")
@@ -714,9 +782,9 @@ def _sentences_s3_key(
     dataset_name: str, split_name: str, use_frac: float, shard_idx: int = 0, num_shards: int = NUM_GENERATION_SHARDS
 ) -> str:
     use_frac_str = f"{use_frac:.2f}" if split_name=="train" else "full"
-    # split-2 protocol: Dandelion sentences live under dandelion/split_2_related/sentences/
+    # Dandelion sentences live under dandelion/<split dir>/sentences/ (split_2_related or split_3_folds)
     if dataset_name == "dandelion":
-        sentences_prefix = f"{prefix_out}/dandelion/split_2_related/sentences"
+        sentences_prefix = f"{dandelion_prefix()}/sentences"
     else:
         sentences_prefix = f"{prefix_out}/sentences"
     if num_shards == 1:
@@ -1170,6 +1238,8 @@ def load_finetuning_sentences_for_worker(
         f"(rank {world_rank}/{world_size}, shards {shard_indices}) "
         f"for [{dataset_name}] {split_name}"
     )
+    if dataset_name == "dandelion" and split_name == "train" and DANDELION_FOLD is not None:
+        merged = filter_sentences_to_fold(merged, DANDELION_FOLD, DANDELION_FOLD_DUP)
     return merged
 
 

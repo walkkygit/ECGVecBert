@@ -46,11 +46,12 @@ from sklearn.metrics import precision_score, recall_score, roc_auc_score
 from torch.utils.data import DataLoader
 
 from vqvae_bert_finetuning import (
-    CONFIG, NUM_CLASSES, PRETRAIN_CONFIG, prefix_dandelion_split2, prefix_root_bert_model,
+    CONFIG, NUM_CLASSES, PRETRAIN_CONFIG, prefix_root_bert_model,
     build_finetune_model, load_lora_checkpoint, unwrap_model,
 )
 from vqvae_bert_finetuning_sentences_dataset import (
     NUM_GENERATION_SHARDS, SEGMENTS, FinetuningBeatSentenceDataset, _concat_sentence_dicts,
+    set_dandelion_fold, dandelion_prefix,
 )
 from vqvae_ecg_waveforms_dataset import bucket_out
 from collect_results import TAG_RE
@@ -60,12 +61,17 @@ log = logging.getLogger(__name__)
 
 DATASET = "dandelion"
 USE_FRAC = 1.0
-SPLITS = {
-    # split name -> (S3 prefix of the shards, file stem, results sub-prefix)
-    "internal_test": (f"{prefix_dandelion_split2}/sentences", "dandelion_test_full", "eval_internal_test"),
-    "7k":            (f"{prefix_dandelion_split2}/sentences_7k", "dandelion_7k_full", "final_7k"),
-}
+SPLIT_NAMES = ("internal_test", "7k")
 ATTN_ONLY = ["W_Q", "W_K", "W_V"]
+
+
+def split_spec(split: str) -> tuple[str, str, str]:
+    """split name -> (S3 prefix of the shards, file stem, results sub-prefix), under the active Dandelion protocol
+    (split_2_related by default; split_3_folds with --folds, whose sentences are byte copies of split 2)."""
+    return {
+        "internal_test": (f"{dandelion_prefix()}/sentences", "dandelion_test_full", "eval_internal_test"),
+        "7k":            (f"{dandelion_prefix()}/sentences_7k", "dandelion_7k_full", "final_7k"),
+    }[split]
 
 
 # ----------------------------------------------------------------------------- config from the run tag
@@ -88,7 +94,7 @@ def config_from_run_tag(run_tag: str) -> dict:
 
 # ----------------------------------------------------------------------------- data
 def load_split_sentences(fs: s3fs.S3FileSystem, split: str, num_shards: int = NUM_GENERATION_SHARDS) -> dict:
-    prefix, stem, _ = SPLITS[split]
+    prefix, stem, _ = split_spec(split)
     parts = []
     for si in range(num_shards):
         key = f"s3://{bucket_out}/{prefix}/{stem}_shard_{si:04d}_of_{num_shards:04d}.npz"
@@ -170,9 +176,12 @@ def _fmt(m: dict) -> str:
 # ----------------------------------------------------------------------------- main
 def main():
     p = argparse.ArgumentParser(description="One-shot evaluation of a Dandelion finetuning run")
-    p.add_argument("--run_tag", type=str, required=True, help="run tag of the finished run (as in results_dandelion_split2.csv)")
+    p.add_argument("--run_tag", type=str, required=True,
+                   help="run tag of the finished run (as in the results CSV); phase 3: a comma-separated list of tags "
+                        "(e.g. the 3 fold models) is evaluated per tag AND as one probability-averaged ensemble")
     p.add_argument("--seeds", type=str, default="42", help="comma-separated seeds whose checkpoints exist for this tag")
-    p.add_argument("--split", type=str, default="internal_test", choices=sorted(SPLITS))
+    p.add_argument("--split", type=str, default="internal_test", choices=sorted(SPLIT_NAMES))
+    p.add_argument("--folds", type=str, default="no", help="'yes' = phase 3: checkpoints + sentences + results under split_3_folds/")
     p.add_argument("--i_confirm_final_7k", type=str, default="no", help="must be 'yes' for --split 7k")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--force", type=str, default="no", help="'yes' overwrites existing results (never for 7k)")
@@ -181,9 +190,13 @@ def main():
     a = p.parse_args()
 
     seeds = [int(s) for s in a.seeds.split(",") if s.strip()]
+    tags = [t.strip() for t in a.run_tag.split(",") if t.strip()]
+    if a.folds == "yes":
+        set_dandelion_fold(1)            # any fold selects the split_3_folds protocol; the fold itself is in each tag
     fs = s3fs.S3FileSystem()
-    _, _, results_sub = SPLITS[a.split]
-    out_prefix = f"{prefix_dandelion_split2}/results/{results_sub}/{a.run_tag}"
+    _, _, results_sub = split_spec(a.split)
+    out_name = tags[0] if len(tags) == 1 else "ensemble__" + "__".join(tags)
+    out_prefix = f"{dandelion_prefix()}/results/{results_sub}/{out_name}"
     metrics_key = f"s3://{bucket_out}/{out_prefix}/metrics.json"
 
     if a.split == "7k":
@@ -194,8 +207,6 @@ def main():
     elif fs.exists(metrics_key) and a.force != "yes":
         raise SystemExit(f"{metrics_key} exists; pass --force yes to overwrite")
 
-    cfg = config_from_run_tag(a.run_tag)
-    log.info(f"run_tag={a.run_tag} -> {cfg}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cnn = PRETRAIN_CONFIG["use_cnn_features"]
 
@@ -205,45 +216,53 @@ def main():
     cnn_dim = dataset.cnn_embedding_dim if use_cnn else 0
 
     prefix_bert_model = f"{prefix_root_bert_model}/bert_model_nleads_{CONFIG['in_channels']}.pt"
-    results = {"run_tag": a.run_tag, "split": a.split, "seeds": seeds, "config": cfg,
+    results = {"run_tag": a.run_tag, "run_tags": tags, "split": a.split, "seeds": seeds,
+               "protocol": dandelion_prefix().rsplit("/", 1)[-1],
+               "config": {t: config_from_run_tag(t) for t in tags},
                "timestamp_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-               "sentences_prefix": f"{SPLITS[a.split][0]}/{SPLITS[a.split][1]}_*", "num_shards_read": a.num_shards,
+               "sentences_prefix": f"{split_spec(a.split)[0]}/{split_spec(a.split)[1]}_*", "num_shards_read": a.num_shards,
                "aggregation": "vote = strict majority of sentence argmax (as in training); auroc = mean sentence P(low EF)",
                "per_seed": {}, "checkpoints": {}}
+    for t in tags:
+        log.info(f"run_tag={t} -> {results['config'][t]}")
     prob_sum = None
     ref_idxs = None
-    for seed in seeds:
+    members = [(t, sd) for t in tags for sd in seeds]        # one checkpoint per (tag, seed)
+    for tag, seed in members:
+        cfg = results["config"][tag]
+        key = str(seed) if len(tags) == 1 else f"{tag}:seed{seed}"
         model = build_finetune_model(dataset.vocab_size, use_cnn, cnn_dim, NUM_CLASSES[DATASET], cfg["lora_r"], cfg["lora_alpha"],
                                      cfg["lora_dropout"], cfg["dropout"], prefix_bert_model, dataset_name=DATASET,
                                      class_weight=[1.0, cfg["class_weight"]], target_modules=cfg["target_modules"])
-        res = load_lora_checkpoint(model, fs, USE_FRAC, DATASET, seed, run_tag=a.run_tag)
+        res = load_lora_checkpoint(model, fs, USE_FRAC, DATASET, seed, run_tag=tag)
         # A LoRA state dict holds only adapter + head weights; frozen base-model keys are always "missing".
         # What must NOT happen: unexpected keys (architecture mismatch) or a missing adapter/head weight.
         bad_missing = [k for k in res.missing_keys if "lora_" in k or "modules_to_save" in k]
         assert not res.unexpected_keys and not bad_missing, (
             f"seed {seed}: checkpoint/architecture mismatch; unexpected={res.unexpected_keys[:5]} "
             f"missing adapter/head={bad_missing[:5]}")
-        results["checkpoints"][str(seed)] = (f"{prefix_dandelion_split2}/results/lora_bert_finetuned_{DATASET}_{USE_FRAC}"
-                                             f"_{a.run_tag}_seed{seed}.pt")
+        results["checkpoints"][key] = (f"{dandelion_prefix()}/results/lora_bert_finetuned_{DATASET}_{USE_FRAC}"
+                                       f"_{tag}_seed{seed}.pt")
         model.to(device)
         probs, labels, ecg_idxs = predict_sentences(model, loader, use_cnn, device)
         if ref_idxs is None:
             ref_idxs, ref_labels = ecg_idxs, labels
         else:
-            assert np.array_equal(ref_idxs, ecg_idxs), "sentence order differs between seeds"
+            assert np.array_equal(ref_idxs, ecg_idxs), "sentence order differs between checkpoints"
         prob_sum = probs if prob_sum is None else prob_sum + probs
         m, arrays = aggregate_records(probs, labels, ecg_idxs)
-        results["per_seed"][str(seed)] = m
-        log.info(f"[{a.split}] seed {seed}: {_fmt(m)}")
-        _save_npz(fs, f"{out_prefix}/predictions_seed{seed}.npz", arrays, a.local_out)
+        results["per_seed"][key] = m
+        log.info(f"[{a.split}] {key}: {_fmt(m)}")
+        fname = f"predictions_seed{seed}.npz" if len(tags) == 1 else f"predictions_{tag}_seed{seed}.npz"
+        _save_npz(fs, f"{out_prefix}/{fname}", arrays, a.local_out)
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    if len(seeds) > 1:
-        m, arrays = aggregate_records(prob_sum / len(seeds), ref_labels, ref_idxs)
+    if len(members) > 1:
+        m, arrays = aggregate_records(prob_sum / len(members), ref_labels, ref_idxs)
         results["ensemble"] = m
-        log.info(f"[{a.split}] ENSEMBLE of {len(seeds)} seeds: {_fmt(m)}")
+        log.info(f"[{a.split}] ENSEMBLE of {len(members)} checkpoints (mean sentence probability): {_fmt(m)}")
         _save_npz(fs, f"{out_prefix}/predictions_ensemble.npz", arrays, a.local_out)
 
     body = json.dumps(results, indent=2)

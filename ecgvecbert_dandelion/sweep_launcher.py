@@ -10,6 +10,8 @@ Usage (from the SageMaker notebook, after `git pull origin master`):
     python sweep_launcher.py --round 2 --class_weight 2.5   # LR round at the winning class weight
     python sweep_launcher.py --configs '[{"class_weight": 2.5, "lr": 3e-5}]'   # any ad-hoc list
     python sweep_launcher.py --round 1 --dry_run  # print what would be submitted
+Phase 3 (fold training, outputs under dandelion/split_3_folds/): one job per config x fold, e.g.
+    python sweep_launcher.py --folds 1,2,3 --ckpt_metric val_loss --lr 1e-5 --configs '[{"class_weight": 1.0}, {"class_weight": 1.5}]'
 
 Instance: ml.g5.8xlarge by default (account quota 32 -> jobs run in parallel).
 ml.g4dn.8xlarge has quota 1, so it can only run one job at a time.
@@ -45,9 +47,11 @@ def short_tag(cfg: dict) -> str:
     for k, v in cfg.items():
         key = {"class_weight": "cw", "lr": "lr", "lora_r": "r", "dropout": "do", "lora_dropout": "ld",
                "weight_decay": "wd", "target_modules": "tm", "ckpt_metric": "ck",
-               "lr_head_factor": "hf", "lora_alpha": "a"}.get(k, k)
+               "lr_head_factor": "hf", "lora_alpha": "a", "fold": "f", "fold_dup": "dup"}.get(k, k)
         if k == "target_modules":
             val = "attn"
+        elif k == "fold_dup":
+            val = v[0]                     # dupu / dupr
         elif k == "ckpt_metric":
             val = "vloss" if v == "val_loss" else str(v)
         else:
@@ -71,6 +75,10 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt_metric", type=str, default=None, choices=["gmean", "val_loss"])
     parser.add_argument("--lr_head_factor", type=float, default=None, help="head LR = lr * factor (default 0.1)")
     parser.add_argument("--lora_alpha", type=int, default=None, help="LoRA alpha (default 16)")
+    parser.add_argument("--folds", type=str, default=None,
+                        help="phase 3: comma-separated training folds, e.g. '1,2,3' -> one job per config per fold")
+    parser.add_argument("--fold_dup", type=str, default=None, choices=["unique", "repeat"],
+                        help="phase 3: keep fold repeats ('repeat') or one copy per patient ('unique', default)")
     parser.add_argument("--seeds", type=str, default=SEEDS)
     parser.add_argument("--instance_type", type=str, default=INSTANCE_TYPE)
     parser.add_argument("--dry_run", action="store_true", help="print the jobs, submit nothing")
@@ -85,9 +93,15 @@ if __name__ == "__main__":
 
     fixed = {k: getattr(args, k) for k in ["class_weight", "lr", "lora_r", "dropout", "lora_dropout",
                                            "weight_decay", "target_modules", "ckpt_metric",
-                                           "lr_head_factor", "lora_alpha"] if getattr(args, k) is not None}
+                                           "lr_head_factor", "lora_alpha", "fold_dup"] if getattr(args, k) is not None}
+    folds = [int(f) for f in args.folds.split(",") if f.strip()] if args.folds else [None]
+    if folds != [None]:
+        assert all(f in (1, 2, 3) for f in folds), folds
+        configs = [dict(cfg, fold=f) for cfg in configs for f in folds]     # phase 3: config x fold
+    elif "fold_dup" in fixed:
+        parser.error("--fold_dup only makes sense together with --folds")
 
-    log.info(f"{len(configs)} job(s), fixed={fixed}, seeds={args.seeds}, instance={args.instance_type}")
+    log.info(f"{len(configs)} job(s), fixed={fixed}, folds={folds}, seeds={args.seeds}, instance={args.instance_type}")
     for cfg in configs:
         hp = dict(fixed, **cfg)          # per-config values win over the fixed ones
         tag = short_tag(hp)

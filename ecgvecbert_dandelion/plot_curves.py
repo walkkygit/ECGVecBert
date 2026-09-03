@@ -26,6 +26,7 @@ import s3fs
 
 BUCKET = "walkky-ml"
 PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/results"
+PREFIX_FOLDS = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_3_folds/results"      # phase 3 (--folds)
 FILE_RE = re.compile(r"finetune_train_val_metrics_dandelion_1\.0(?:_(?P<tag>.+?))?_seed(?P<seed>\d+)\.npz$")
 
 
@@ -102,9 +103,14 @@ def plot_compare(runs, out_dir):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out_dir", default=os.path.expanduser("~/Desktop/ECGVecBert/results_split2"))
+    ap.add_argument("--out_dir", default=None, help="default ~/Desktop/ECGVecBert/results_split2 (results_split3_folds with --folds)")
     ap.add_argument("--match", nargs="*", default=None, help="only tags containing one of these substrings")
+    ap.add_argument("--folds", action="store_true", help="phase 3: read split_3_folds/results")
     args = ap.parse_args()
+    if args.folds:
+        PREFIX = PREFIX_FOLDS
+    if args.out_dir is None:
+        args.out_dir = os.path.expanduser("~/Desktop/ECGVecBert/results_split3_folds" if args.folds else "~/Desktop/ECGVecBert/results_split2")
     os.makedirs(args.out_dir, exist_ok=True)
     fs = s3fs.S3FileSystem()
     runs = load_runs(fs, args.match)

@@ -9,6 +9,7 @@ Writes results_dandelion_split2.csv locally and to the same S3 folder, and print
 val record G-mean (the sweep judge). Test columns are for reporting only; never pick a config on them.
 
 Usage:  python collect_results.py            (works locally or on SageMaker; needs S3 read access)
+        python collect_results.py --folds    (phase 3: split_3_folds/results -> results_dandelion_split3_folds.csv)
 """
 
 import io
@@ -22,10 +23,13 @@ import s3fs
 BUCKET = "walkky-ml"
 PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/results"
 OUT_NAME = "results_dandelion_split2.csv"
+# phase 3 (2026-09-03): one model per training fold, everything under split_3_folds/
+PREFIX_FOLDS = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_3_folds/results"
+OUT_NAME_FOLDS = "results_dandelion_split3_folds.csv"
 
 TAG_RE = re.compile(r"cw(?P<cw>[\d.]+)_lr(?P<lr>[\d.e+-]+)_r(?P<r>\d+)_do(?P<do>[\d.]+)_ld(?P<ld>[\d.]+)"
                     r"_wd(?P<wd>[\d.e+-]+)_tm(?P<tm>[A-Za-z]+)(?:_ck(?P<ck>[A-Za-z]+))?"
-                    r"(?:_hf(?P<hf>[\d.]+))?(?:_a(?P<a>\d+))?")
+                    r"(?:_hf(?P<hf>[\d.]+))?(?:_a(?P<a>\d+))?(?:_f(?P<fold>[123]))?(?:_dup(?P<dup>[ur]))?")
 
 
 def load_npz(fs, key):
@@ -35,6 +39,10 @@ def load_npz(fs, key):
 
 
 def main():
+    global PREFIX, OUT_NAME
+    if "--folds" in sys.argv[1:]:
+        PREFIX, OUT_NAME = PREFIX_FOLDS, OUT_NAME_FOLDS
+        print(f"phase 3 (fold training): reading {PREFIX} -> {OUT_NAME}")
     fs = s3fs.S3FileSystem()
     keys = [k.split(f"{BUCKET}/", 1)[1] for k in fs.ls(f"s3://{BUCKET}/{PREFIX}")]
     test_keys = [k for k in keys if re.search(r"/finetune_test_metrics_dandelion_1\.0(_.+)?\.npz$", k)]
@@ -51,6 +59,8 @@ def main():
                         "target_modules": cfg.get("tm"),
                         "lr_head_factor": cfg.get("hf") or ("0.1" if cfg else None),
                         "lora_alpha": cfg.get("a") or ("16" if cfg else None),
+                        "fold": cfg.get("fold"),
+                        "fold_dup": ({"u": "unique", "r": "repeat"}.get(cfg.get("dup")) or ("unique" if cfg.get("fold") else None)),
                         "ckpt_metric": "val_loss" if cfg.get("ck") == "vloss" else ("gmean" if cfg else None)})
             # per-epoch val curve for this seed -> value at the best epoch
             vk = f"{PREFIX}/finetune_train_val_metrics_dandelion_1.0{'_' + tag if tag else ''}_seed{seed}.npz"
@@ -75,7 +85,7 @@ def main():
     if not rows:
         print("no result files found"); sys.exit(1)
     cols = ["run_tag", "seed", "class_weight", "lr", "lora_r", "dropout", "lora_dropout", "weight_decay",
-            "target_modules", "ckpt_metric", "lr_head_factor", "lora_alpha", "best_epoch", "epochs_run", "val_gmean", "val_sens", "val_spec", "val_auroc",
+            "target_modules", "ckpt_metric", "lr_head_factor", "lora_alpha", "fold", "fold_dup", "best_epoch", "epochs_run", "val_gmean", "val_sens", "val_spec", "val_auroc",
             "test_gmean", "test_sens", "test_spec", "test_auroc", "test_acc", "test_f1"]
     df = pd.DataFrame(rows).reindex(columns=cols).sort_values(["val_gmean", "val_auroc"], ascending=False, na_position="last")
     df.to_csv(OUT_NAME, index=False)

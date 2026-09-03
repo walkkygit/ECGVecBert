@@ -34,6 +34,12 @@ log = logging.getLogger(__name__)
 # SageMaker / AWS settings
 BUCKET_OUT = "walkky-ml"
 S3_OUTPUT_PREFIX = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_2_related/job_logs"
+# phase 3 (2026-09-03): fold runs keep their job logs / source tarballs under split_3_folds/
+S3_OUTPUT_PREFIX_FOLDS = "ecgvectbert/vqvae/bert_finetuning/dandelion/split_3_folds/job_logs"
+
+
+def job_logs_prefix(hyperparameters: dict) -> str:
+    return S3_OUTPUT_PREFIX_FOLDS if hyperparameters.get("fold") is not None else S3_OUTPUT_PREFIX
 
 # Training container
 PYTORCH_VERSION = "2.2.0"
@@ -99,8 +105,8 @@ def make_estimator(sm_session, ROLE_ARN, hyperparameters, instance_type: str = N
         py_version=PYTHON_VERSION,
         sagemaker_session=sm_session,
         base_job_name=job_name,
-        output_path=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/",
-        code_location=f"s3://{BUCKET_OUT}/{S3_OUTPUT_PREFIX}/code",   # source tarballs here, not at the bucket root
+        output_path=f"s3://{BUCKET_OUT}/{job_logs_prefix(hyperparameters)}/",
+        code_location=f"s3://{BUCKET_OUT}/{job_logs_prefix(hyperparameters)}/code",   # source tarballs here, not at the bucket root
         # No `distribution=` here on purpose: Ray Train's TorchTrainer already
         # launches one worker process per GPU internally. Adding SageMaker's
         # torch_distributed launcher on top would double-spawn workers.
@@ -173,6 +179,8 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--target_modules", type=str, default=None, help="e.g. 'W_Q,W_K,W_V' for attention-only LoRA")
     parser.add_argument("--run_tag", type=str, default=None, help="output-file suffix ('' = none; default auto)")
+    parser.add_argument("--fold", type=int, default=None, choices=[1, 2, 3], help="phase 3: train on this fold only")
+    parser.add_argument("--fold_dup", type=str, default=None, choices=["unique", "repeat"])
     parser.add_argument("--ckpt_metric", type=str, default=None, choices=["gmean", "val_loss"],
                         help="dandelion checkpoint rule (default: finetuning CONFIG)")
     parser.add_argument("--instance_type", type=str, default=None,
@@ -188,7 +196,7 @@ if __name__ == "__main__":
     seeds = args.seeds or SEEDS
     extra_hp = {k: getattr(args, k) for k in ["class_weight", "lr", "lora_r", "lora_dropout", "dropout",
                                               "weight_decay", "patience", "target_modules", "run_tag", "ckpt_metric",
-                                              "lr_head_factor", "lora_alpha"]}
+                                              "lr_head_factor", "lora_alpha", "fold", "fold_dup"]}
 
     if args.all:
         for usefrac, dataset in itertools.product(USE_FRAC, DATASETS):

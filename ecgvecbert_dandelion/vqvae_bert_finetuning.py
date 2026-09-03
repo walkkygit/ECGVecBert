@@ -25,6 +25,7 @@ from vqvae_model import PaddedLoader
 from vqvae_bert_sentence_dataset import MAX_SENTENCE_LEN
 from vqvae_ecg_waveforms_dataset import bucket_out, NLEADS
 from vqvae_bert_finetuning_sentences_dataset import (
+    set_dandelion_fold, dandelion_prefix,
     DATASETS,
     get_or_build_finetuning_sentences,
     create_finetuning_worker_dataloaders,
@@ -70,6 +71,11 @@ CONFIG = {
     # Dandelion checkpoint rule: "gmean" = best val record G-mean at the 0.5 line (AUROC tiebreaker);
     # "val_loss" = lowest sentence-level val loss (threshold-free)
     "ckpt_metric": "gmean",
+    # Phase 3 (2026-09-03): train on ONE of the 3 training folds (split_patients/training_patients.pkl) instead of
+    # the whole train set. None = phase-2 behaviour (split_2_related). 1/2/3 -> everything under split_3_folds/.
+    # fold_dup: "unique" = each fold patient once; "repeat" = as many times as the fold lists it (fold 3 repeats some)
+    "fold": None,
+    "fold_dup": "unique",
 }
 
 
@@ -81,8 +87,11 @@ def make_run_tag(cfg: dict) -> str:
     # newer knobs only appear when non-default, so every earlier tag stays byte-identical
     hf = f"_hf{cfg['lr_head_factor']}" if cfg.get("lr_head_factor", 0.1) != 0.1 else ""
     la = f"_a{cfg['lora_alpha']}" if cfg.get("lora_alpha", 16) != 16 else ""
+    # phase 3: "_f<fold>" (+ "_dupr" when repeated patients are kept) so the 3 fold models never overwrite each other
+    fo = f"_f{int(cfg['fold'])}" if cfg.get("fold") is not None else ""
+    du = "_dupr" if fo and cfg.get("fold_dup", "unique") == "repeat" else ""
     return (f"cw{cfg['class_weight']}_lr{cfg['lr']:.0e}_r{cfg['lora_r']}_do{cfg['dropout']}"
-            f"_ld{cfg['lora_dropout']}_wd{cfg['weight_decay']:.0e}_tm{tm}{ck}{hf}{la}")
+            f"_ld{cfg['lora_dropout']}_wd{cfg['weight_decay']:.0e}_tm{tm}{ck}{hf}{la}{fo}{du}")
 
 
 def _sfx(run_tag: str) -> str:
@@ -97,12 +106,13 @@ prefix_root_bert_model = "aruna-files/vqvae_final_12lead_vqenc/vqvae/bert_pretra
 prefix_sentences = f"{prefix_finetuning}/sentences"
 
 # split-2 protocol (2026-08-31): all Dandelion artifacts live under dandelion/split_2_related/
+# phase 3 (2026-09-03): with CONFIG["fold"] set they live under dandelion/split_3_folds/ (see dandelion_prefix())
 prefix_dandelion_split2 = f"{prefix_finetuning}/dandelion/split_2_related"
 
 
 def _results_prefix(dataset_name: str) -> str:
     if dataset_name == "dandelion":
-        return f"{prefix_dandelion_split2}/results"
+        return f"{dandelion_prefix()}/results"
     return f"{prefix_finetuning}/{dataset_name}"
 
 NUM_CLASSES = {"ptbxl_superclasses": 5,
@@ -593,6 +603,8 @@ def train_loop_per_worker(loop_config: dict) -> None:
     target_modules = loop_config.get("target_modules", CONFIG["target_modules"])
     run_tag = loop_config.get("run_tag", "")
     ckpt_metric = loop_config.get("ckpt_metric", "gmean")
+    # Ray workers are fresh processes: re-apply the Dandelion protocol (split dir + training fold) here
+    set_dandelion_fold(loop_config.get("fold"), loop_config.get("fold_dup", "unique"))
 
     prefix_bert_model = f"{prefix_root_bert_model}/bert_model_nleads_{in_channels}.pt"
 
@@ -646,6 +658,9 @@ def train_loop_per_worker(loop_config: dict) -> None:
                                  dataset_name=dataset_name, class_weight=class_weight, target_modules=target_modules)
     if is_main_process() and run_tag:
         log.info(f"[{dataset_name}] run_tag={run_tag} (suffix on all output files)")
+    if is_main_process() and loop_config.get("fold") is not None:
+        log.info(f"[{dataset_name}] PHASE 3: training fold {loop_config['fold']} ({loop_config.get('fold_dup', 'unique')}), "
+                 f"outputs under {_results_prefix(dataset_name)}")
     model = ray_torch.prepare_model(model)
 
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
@@ -959,6 +974,8 @@ def run_finetuning(seeds: list[int] = None):
                 "target_modules": list(run_config_copy["target_modules"]),
                 "run_tag": run_config_copy["run_tag"],
                 "ckpt_metric": run_config_copy["ckpt_metric"],
+                "fold": run_config_copy.get("fold"),
+                "fold_dup": run_config_copy.get("fold_dup", "unique"),
             },
             scaling_config=ScalingConfig(num_workers=CONFIG["num_ray_workers"], use_gpu=CONFIG["use_gpu"]),
             run_config=RunConfig(name=f"vqvae-bert-finetune-{run_config_copy['dataset']}-{run_config_copy['use_frac']}-seed{seed}".replace('.', 'p')),
@@ -1032,12 +1049,18 @@ if __name__ == "__main__":
                         help="dandelion checkpoint rule: 'gmean' (val record G-mean at 0.5) or 'val_loss' (lowest val loss)")
     parser.add_argument("--lr_head_factor", type=float,
                         help="classifier-head LR = lr * lr_head_factor (default 0.1)")
+    parser.add_argument("--fold", type=int, choices=[1, 2, 3],
+                        help="phase 3: train on this training fold only (all outputs under dandelion/split_3_folds/)")
+    parser.add_argument("--fold_dup", type=str, choices=["unique", "repeat"],
+                        help="phase 3: 'unique' = each fold patient once (default); 'repeat' = keep the fold's repeats")
     cli_args, _ = parser.parse_known_args()
     for key in ["dataset", "use_frac", "in_channels", "lr", "batch_size", "lora_r",
                 "lora_alpha", "lora_dropout", "weight_decay", "num_ray_workers",
-                "class_weight", "dropout", "patience", "ckpt_metric", "lr_head_factor"]:
+                "class_weight", "dropout", "patience", "ckpt_metric", "lr_head_factor", "fold", "fold_dup"]:
         if getattr(cli_args, key) is not None:
             CONFIG[key] = getattr(cli_args, key)
+    # driver-side protocol switch (workers re-apply it from loop_config)
+    set_dandelion_fold(CONFIG.get("fold"), CONFIG.get("fold_dup", "unique"))
     if cli_args.target_modules:
         CONFIG["target_modules"] = [m.strip() for m in cli_args.target_modules.split(",") if m.strip()]
     if cli_args.run_tag is not None:
